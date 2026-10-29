@@ -104,7 +104,10 @@ async function processSyncEntry(
   } else if (entry.entityType === 'stock_adjustment') {
     return processStockAdjustmentSync(db, entry, now)
   } else {
-    return { success: false, error: `Unknown entity type: ${entry.entityType}` }
+    // Generic entities (user, category, unit, unit_alias, inventory_batch,
+    // inventory_balance, sale_item, payment, return, pharmacy, etc.) are
+    // fully persisted into cloud_entities by applyGenericEntity above.
+    return { success: true, serverVersion: generic.serverVersion ?? 1 }
   }
 }
 

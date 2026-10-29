@@ -45,12 +45,19 @@ export async function mobileRoutes(app: FastifyInstance): Promise<void> {
 
     const matches = candidates.filter((c) => {
       const payload = (c.payload ?? {}) as Record<string, unknown>
-      const candidateUsername = typeof payload.username === 'string' ? payload.username.toLowerCase() : ''
-      return (
-        candidateUsername === username &&
-        payload.isActive === true &&
-        (payload.role === 'owner_admin' || payload.role === 'super_admin')
-      )
+      const candidateUsername = typeof payload.username === 'string' ? payload.username.trim().toLowerCase() : ''
+      const isActive =
+        payload.isActive === true ||
+        payload.isActive === 1 ||
+        payload.isActive === '1' ||
+        payload.isActive === 'true' ||
+        payload.is_active === 1 ||
+        payload.is_active === true ||
+        payload.is_active === '1'
+      const role = String(payload.role ?? '').toLowerCase()
+      const isMobileRole =
+        role === 'owner_admin' || role === 'super_admin' || role === 'admin' || role === 'owner'
+      return candidateUsername === username && isActive && isMobileRole
     })
 
     if (matches.length === 0) {
@@ -60,7 +67,9 @@ export async function mobileRoutes(app: FastifyInstance): Promise<void> {
 
     for (const match of matches) {
       const payload = (match.payload ?? {}) as Record<string, unknown>
-      const storedHash = typeof payload['passwordHash'] === 'string' ? payload['passwordHash'] : ''
+      const storedHash =
+        (typeof payload['passwordHash'] === 'string' ? payload['passwordHash'] : '') ||
+        (typeof payload['password_hash'] === 'string' ? payload['password_hash'] : '')
       if (storedHash === '') continue
 
       const valid = await bcrypt.compare(passcode, storedHash)

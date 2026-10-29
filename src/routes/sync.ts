@@ -33,11 +33,9 @@ export async function syncRoutes(app: FastifyInstance): Promise<void> {
 
     const pharmacyId = (request as any).pharmacyId
 
-    // Validate all entries belong to the authenticated pharmacy
-    const invalid = entries.find((e) => e.pharmacyId !== pharmacyId)
-    if (invalid) {
-      reply.status(403).send({ error: 'Entry pharmacyId does not match authenticated pharmacy' })
-      return
+    // Ensure all entries are attributed to the authenticated pharmacy session
+    for (const entry of entries) {
+      entry.pharmacyId = pharmacyId
     }
 
     const result = await processSyncBatch(entries)
