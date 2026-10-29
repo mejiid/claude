@@ -1,0 +1,48 @@
+services:
+  app:
+    build: ..
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pharmacy_sync}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Real TCP login with the .env password — catches the "volume was
+      # initialised with an old password" mismatch (28P01) that pg_isready
+      # silently passes. $$ escapes compose interpolation; the container's
+      # own shell expands $POSTGRES_PASSWORD.
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql -h 127.0.0.1 -U pharmacy -d pharmacy_sync -c 'SELECT 1'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+  backups:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./backup.sh:/usr/local/bin/backup.sh:ro
+      - pgbackups:/backups
+    entrypoint: ["/bin/sh", "-c", "while true; do /usr/local/bin/backup.sh; sleep 86400; done"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  pgbackups:
