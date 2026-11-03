@@ -302,33 +302,71 @@ export interface LowStockResult {
   items: Array<{ medicineName: string; storeQty: number; dispatcherQty: number; totalQty: number }>
 }
 
-export async function getLowStock(pharmacyId: number, threshold = 5): Promise<LowStockResult> {
+export async function getLowStock(pharmacyId: number, threshold = 10): Promise<LowStockResult> {
   const [balances, medicines] = await Promise.all([
     fetchEntities(pharmacyId, 'inventory_balance'),
     fetchEntities(pharmacyId, 'medicine'),
   ])
-  const names = new Map(medicines.map((m) => [m.globalId, str(m.payload.name)]))
 
-  const perMedicine = new Map<string, { store: number; dispatcher: number }>()
+  // Dual map for medicines (by globalId AND by local integer id)
+  const medNameByGid = new Map<string, string>()
+  const medGidByLocalId = new Map<number, string>()
+
+  for (const m of medicines) {
+    const name = str(m.payload.name) || 'Unknown'
+    medNameByGid.set(m.globalId, name)
+    const localId = num(m.payload.id)
+    if (localId > 0) {
+      medGidByLocalId.set(localId, m.globalId)
+    }
+  }
+
+  // Pre-seed with all active medicines so out-of-stock (0 units) items are tracked
+  const perMedicine = new Map<string, { store: number; dispatcher: number; name: string }>()
+  for (const m of medicines) {
+    if (m.payload.isActive !== false) {
+      const name = str(m.payload.name)
+      if (name) {
+        perMedicine.set(m.globalId, { store: 0, dispatcher: 0, name })
+      }
+    }
+  }
+
   for (const b of balances) {
-    const medGid = str(b.payload.medicineGlobalId)
+    // Resolve medicine identifier by globalId OR local medicineId
+    const medGid =
+      str(b.payload.medicineGlobalId) ||
+      medGidByLocalId.get(num(b.payload.medicineId)) ||
+      (num(b.payload.medicineId) > 0 ? String(b.payload.medicineId) : '')
+
     if (!medGid) continue
+
     const qty = num(b.payload.quantityBase)
-    if (qty <= 0) continue
-    const entry = perMedicine.get(medGid) ?? { store: 0, dispatcher: 0 }
-    if (str(b.payload.location) === 'store') entry.store += qty
-    else entry.dispatcher += qty
+    const entry = perMedicine.get(medGid) ?? {
+      store: 0,
+      dispatcher: 0,
+      name: medNameByGid.get(medGid) ?? 'Unknown',
+    }
+
+    const loc = str(b.payload.location).toLowerCase()
+    if (loc === 'store') {
+      entry.store += qty
+    } else {
+      entry.dispatcher += qty
+    }
+
     perMedicine.set(medGid, entry)
   }
 
-  const items = Array.from(perMedicine.entries())
-    .map(([medGid, qty]) => ({
-      medicineName: names.get(medGid) ?? 'Unknown',
-      storeQty: qty.store,
-      dispatcherQty: qty.dispatcher,
-      totalQty: qty.store + qty.dispatcher,
+  const items = Array.from(perMedicine.values())
+    .map((entry) => ({
+      medicineName: entry.name,
+      storeQty: Math.max(0, Math.round(entry.store)),
+      dispatcherQty: Math.max(0, Math.round(entry.dispatcher)),
+      totalQty: Math.max(0, Math.round(entry.store + entry.dispatcher)),
     }))
     .filter((x) => x.totalQty <= threshold)
+    .sort((a, b) => a.totalQty - b.totalQty)
 
   return { generatedAt: Date.now(), threshold, items }
 }
@@ -346,32 +384,102 @@ export async function getExpiry(pharmacyId: number, warningDays = 90): Promise<E
     fetchEntities(pharmacyId, 'inventory_batch'),
     fetchEntities(pharmacyId, 'medicine'),
   ])
-  const names = new Map(medicines.map((m) => [m.globalId, str(m.payload.name)]))
+
+  // Dual map for medicines (by globalId AND by local integer id)
+  const medNameByGid = new Map<string, string>()
+  const medGidByLocalId = new Map<number, string>()
+  for (const m of medicines) {
+    const name = str(m.payload.name) || 'Unknown'
+    medNameByGid.set(m.globalId, name)
+    const localId = num(m.payload.id)
+    if (localId > 0) {
+      medGidByLocalId.set(localId, m.globalId)
+    }
+  }
+
+  // Dual map for batches (by globalId AND by local integer id)
+  const batchGidByLocalId = new Map<number, string>()
+  for (const b of batches) {
+    const localId = num(b.payload.id)
+    if (localId > 0) {
+      batchGidByLocalId.set(localId, b.globalId)
+    }
+  }
+
+  // Sum quantities by batch (keyed by BOTH globalId and local batchId)
+  const qtyByBatchGid = new Map<string, number>()
+  const qtyByLocalBatchId = new Map<number, number>()
+
+  for (const b of balances) {
+    const qty = num(b.payload.quantityBase)
+    if (qty <= 0) continue
+
+    const batchGid = str(b.payload.batchGlobalId) || batchGidByLocalId.get(num(b.payload.batchId))
+    if (batchGid) {
+      qtyByBatchGid.set(batchGid, (qtyByBatchGid.get(batchGid) ?? 0) + qty)
+    }
+
+    const localBatchId = num(b.payload.batchId)
+    if (localBatchId > 0) {
+      qtyByLocalBatchId.set(localBatchId, (qtyByLocalBatchId.get(localBatchId) ?? 0) + qty)
+    }
+  }
+
   const now = Date.now()
   const warnMs = warningDays * 86400000
 
-  const qtyByBatch = new Map<string, number>()
-  for (const b of balances) {
-    const batchGid = str(b.payload.batchGlobalId)
-    const qty = num(b.payload.quantityBase)
-    if (qty > 0 && batchGid) qtyByBatch.set(batchGid, (qtyByBatch.get(batchGid) ?? 0) + qty)
-  }
-
   const expired: ExpiryResult['expiredBatches'] = []
   const expiringSoon: ExpiryResult['expiringSoonBatches'] = []
+
+  const hasBalances = balances.length > 0
+
   for (const batch of batches) {
-    const expiryDate = num(batch.payload.expiryDate)
-    const quantity = qtyByBatch.get(batch.globalId) ?? 0
-    if (quantity <= 0) continue
-    const row = {
-      medicineName: names.get(str(batch.payload.medicineGlobalId)) ?? 'Unknown',
-      batchNumber: str(batch.payload.batchNumber),
-      expiryDate,
-      quantity,
+    const rawExpiry = num(batch.payload.expiryDate)
+    if (!rawExpiry || rawExpiry <= 0) continue
+
+    // Normalize timestamp: if seconds instead of ms (i.e. < 10000000000), multiply by 1000
+    const expiryDate = rawExpiry < 10000000000 ? rawExpiry * 1000 : rawExpiry
+
+    const localBatchId = num(batch.payload.id)
+    let quantity =
+      qtyByBatchGid.get(batch.globalId) ??
+      qtyByLocalBatchId.get(localBatchId) ??
+      0
+
+    // If balances table hasn't synced yet, fall back to batch quantity or 1
+    if (quantity <= 0 && !hasBalances) {
+      quantity = num(batch.payload.quantity) || num(batch.payload.initialQuantity) || 1
     }
-    if (expiryDate <= now) expired.push(row)
-    else if (expiryDate - now <= warnMs) expiringSoon.push(row)
+
+    // If balances exist and show 0, batch is already sold out
+    if (quantity <= 0 && hasBalances) continue
+
+    const medGid =
+      str(batch.payload.medicineGlobalId) ||
+      (localBatchId > 0 ? medGidByLocalId.get(num(batch.payload.medicineId)) : '') ||
+      ''
+
+    const medicineName =
+      (medGid ? medNameByGid.get(medGid) : undefined) ??
+      str(batch.payload.medicineName) ??
+      'Unknown'
+
+    const row = {
+      medicineName,
+      batchNumber: str(batch.payload.batchNumber) || '—',
+      expiryDate,
+      quantity: Math.max(1, Math.round(quantity)),
+    }
+
+    if (expiryDate <= now) {
+      expired.push(row)
+    } else if (expiryDate - now <= warnMs) {
+      expiringSoon.push(row)
+    }
   }
+
+  expired.sort((a, b) => a.expiryDate - b.expiryDate)
+  expiringSoon.sort((a, b) => a.expiryDate - b.expiryDate)
 
   return { generatedAt: now, warningDays, expiredBatches: expired, expiringSoonBatches: expiringSoon }
 }
