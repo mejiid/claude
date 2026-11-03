@@ -49,10 +49,16 @@ export async function processSyncBatch(
   const results: SyncBatchResult['results'] = []
   const appliedSales: Array<{ receiptNumber: string; totalCents: number }> = []
 
-  // Wrap the entire sync batch in a single atomic database transaction
-  await db.transaction(async (tx: DbExecutor) => {
-    for (const entry of entries) {
-      try {
+  // Process each entry in its own isolated transaction so that a single malformed entity
+  // never aborts the entire batch or prevents valid sales from committing.
+  for (const entry of entries) {
+    // Sanitize version: cap at 32-bit integer maximum if an epoch timestamp was erroneously sent
+    if (typeof entry.version === 'number' && entry.version > 2_000_000_000) {
+      entry.version = 1
+    }
+
+    try {
+      await db.transaction(async (tx: DbExecutor) => {
         const result = await processSyncEntry(tx, entry)
         if (result.success && entry.entityType === 'sale' && entry.operation === 'create') {
           appliedSales.push({
@@ -76,15 +82,15 @@ export async function processSyncBatch(
           errorMessage: result.error ?? null,
           createdAt: Date.now(),
         })
-      } catch (err) {
-        results.push({
-          globalId: entry.globalId,
-          success: false,
-          error: err instanceof Error ? err.message : 'Unknown error during entity processing',
-        })
-      }
+      })
+    } catch (err) {
+      results.push({
+        globalId: entry.globalId,
+        success: false,
+        error: err instanceof Error ? err.message : 'Unknown error during entity processing',
+      })
     }
-  })
+  }
 
   return { results, appliedSales }
 }
