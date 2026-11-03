@@ -7,14 +7,19 @@ export async function runCloudMigrations(): Promise<void> {
   const pool = getPool()
   const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-  // Find migrations directory (works both in development with tsx and in production build)
-  let migrationsDir = path.join(__dirname, 'migrations')
-  if (!fs.existsSync(migrationsDir)) {
-    migrationsDir = path.join(__dirname, '../../src/db/migrations')
-  }
+  // Find migrations directory (works in development with tsx, in dist/, and from cwd)
+  const candidateDirs = [
+    path.join(__dirname, 'migrations'),
+    path.join(__dirname, '../../src/db/migrations'),
+    path.join(__dirname, '../src/db/migrations'),
+    path.join(process.cwd(), 'dist/db/migrations'),
+    path.join(process.cwd(), 'src/db/migrations'),
+  ]
 
-  if (!fs.existsSync(migrationsDir)) {
-    console.warn('⚠️ Cloud migrations directory not found at', migrationsDir)
+  let migrationsDir = candidateDirs.find((d) => fs.existsSync(d))
+
+  if (!migrationsDir) {
+    console.warn('⚠️ Cloud migrations directory not found in candidates:', candidateDirs)
     return
   }
 
