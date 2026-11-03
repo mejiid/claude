@@ -87,6 +87,8 @@ export interface BreakdownTotals {
   grossCents: number
   refundsCents: number
   netCents: number
+  cashCents: number
+  digitalCents: number
   transactionCount: number
   paymentBreakdown: Array<{ method: string; netCents: number }>
 }
@@ -110,18 +112,33 @@ function totalsForWindow(
     .reduce((sum, p) => sum + num(p.payload.amountCents), 0)
 
   const methodMap = new Map<string, number>()
+  let cashTotal = 0
+
   for (const p of events) {
     const delta = p.payload.paymentType === 'refund' ? -num(p.payload.amountCents) : num(p.payload.amountCents)
-    const method = str(p.payload.method) || 'cash'
-    methodMap.set(method, (methodMap.get(method) ?? 0) + delta)
+    const provider = str(p.payload.provider).toLowerCase()
+    const rawMethod = str(p.payload.method).toLowerCase()
+    const channel = provider || rawMethod || 'cash'
+
+    methodMap.set(channel, (methodMap.get(channel) ?? 0) + delta)
+
+    if (rawMethod === 'cash') {
+      cashTotal += delta
+    }
   }
+
+  const netCents = Math.max(0, grossCents - refundsCents)
+  const cashCents = Math.max(0, cashTotal)
+  const digitalCents = Math.max(0, netCents - cashCents)
 
   return {
     grossCents,
     refundsCents,
-    netCents: grossCents - refundsCents,
+    netCents,
+    cashCents,
+    digitalCents,
     transactionCount: salesInWindow.length,
-    paymentBreakdown: Array.from(methodMap.entries()).map(([method, netCents]) => ({ method, netCents })),
+    paymentBreakdown: Array.from(methodMap.entries()).map(([method, amount]) => ({ method, netCents: amount })),
   }
 }
 
@@ -146,6 +163,8 @@ export async function getDashboard(pharmacyId: number) {
       grossCents: yesterdayTotals.grossCents,
       refundsCents: yesterdayTotals.refundsCents,
       netCents: yesterdayTotals.netCents,
+      cashCents: yesterdayTotals.cashCents,
+      digitalCents: yesterdayTotals.digitalCents,
       transactionCount: yesterdayTotals.transactionCount,
     },
   }
@@ -357,6 +376,62 @@ export async function getExpiry(pharmacyId: number, warningDays = 90): Promise<E
   return { generatedAt: now, warningDays, expiredBatches: expired, expiringSoonBatches: expiringSoon }
 }
 
+export interface PharmacistPerformanceResult {
+  generatedAt: number
+  range: { from: number; to: number }
+  pharmacists: Array<{
+    userId: number
+    name: string
+    salesCount: number
+    totalCents: number
+  }>
+}
+
+export async function getPharmacistPerformance(
+  pharmacyId: number,
+  from: number,
+  to: number,
+): Promise<PharmacistPerformanceResult> {
+  const [sales, users] = await Promise.all([
+    fetchEntities(pharmacyId, 'sale'),
+    fetchEntities(pharmacyId, 'user'),
+  ])
+
+  const userMap = new Map<number, string>()
+  for (const u of users) {
+    userMap.set(num(u.payload.id), str(u.payload.fullName) || str(u.payload.username))
+  }
+
+  const performanceMap = new Map<number, { count: number; totalCents: number }>()
+
+  for (const s of sales) {
+    if (s.payload.status === 'cancelled') continue
+    const soldAt = num(s.payload.soldAt)
+    if (soldAt < from || soldAt > to) continue
+
+    const userId = num(s.payload.soldByUserId) || 0
+    const current = performanceMap.get(userId) ?? { count: 0, totalCents: 0 }
+    current.count += 1
+    current.totalCents += num(s.payload.totalCents)
+    performanceMap.set(userId, current)
+  }
+
+  const result = Array.from(performanceMap.entries()).map(([userId, data]) => ({
+    userId,
+    name: userMap.get(userId) ?? (userId === 0 ? 'Admin / Default' : `Staff #${userId}`),
+    salesCount: data.count,
+    totalCents: data.totalCents,
+  }))
+
+  result.sort((a, b) => b.totalCents - a.totalCents)
+
+  return {
+    generatedAt: Date.now(),
+    range: { from, to },
+    pharmacists: result,
+  }
+}
+
 export interface GrossProfitResult {
   generatedAt: number
   range: { from: number; to: number }
@@ -382,8 +457,6 @@ export async function getGrossProfit(
 
   const names = new Map(medicines.map((m) => [m.globalId, str(m.payload.name)]))
   const saleById = new Map(sales.map((s) => [s.globalId, s]))
-  const itemById = new Map(items.map((i) => [i.globalId, i]))
-
   const refundsByItem = new Map<string, number>()
   for (const r of returnItems) {
     const saleItemGid = str(r.payload.saleItemGlobalId)

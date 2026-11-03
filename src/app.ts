@@ -8,6 +8,9 @@ import { authRoutes } from './routes/auth.js'
 import { syncRoutes } from './routes/sync.js'
 import { mobileRoutes } from './routes/mobile.js'
 import { realtimeRoutes } from './routes/realtime.js'
+import { licensingRoutes } from './routes/licensing.js'
+import { adminRoutes } from './routes/admin.js'
+import { webhookRoutes } from './routes/webhooks.js'
 import { websocketHub } from './services/websocket-hub.js'
 
 export async function buildApp() {
@@ -45,6 +48,9 @@ export async function buildApp() {
   await app.register(syncRoutes)
   await app.register(mobileRoutes)
   await app.register(realtimeRoutes)
+  await app.register(licensingRoutes)
+  await app.register(adminRoutes)
+  await app.register(webhookRoutes)
 
   return app
 }

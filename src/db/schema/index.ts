@@ -75,6 +75,93 @@ export const cloudMedicines = pgTable('cloud_medicines', {
 }))
 
 // ============================================================
+// Cloud Sale Items
+// ============================================================
+export const cloudSaleItems = pgTable('cloud_sale_items', {
+  globalId: text('global_id').primaryKey(),
+  pharmacyId: integer('pharmacy_id').notNull(),
+  saleGlobalId: text('sale_global_id'),
+  medicineGlobalId: text('medicine_global_id'),
+  medicineName: text('medicine_name'),
+  quantity: integer('quantity').notNull().default(1),
+  unitPriceCents: integer('unit_price_cents').notNull().default(0),
+  totalPriceCents: integer('total_price_cents').notNull().default(0),
+  payload: jsonb('payload'),
+  version: integer('version').notNull().default(1),
+  serverVersion: integer('server_version').notNull().default(1),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  deletedAt: bigint('deleted_at', { mode: 'number' }),
+}, (table) => ({
+  pharmacyIdx: index('idx_cloud_sale_items_pharmacy').on(table.pharmacyId),
+  saleIdx: index('idx_cloud_sale_items_sale').on(table.saleGlobalId),
+}))
+
+// ============================================================
+// Cloud Payments
+// ============================================================
+export const cloudPayments = pgTable('cloud_payments', {
+  globalId: text('global_id').primaryKey(),
+  pharmacyId: integer('pharmacy_id').notNull(),
+  saleGlobalId: text('sale_global_id'),
+  paymentMethod: text('payment_method').notNull().default('cash'),
+  amountCents: integer('amount_cents').notNull().default(0),
+  referenceNumber: text('reference_number'),
+  payload: jsonb('payload'),
+  version: integer('version').notNull().default(1),
+  serverVersion: integer('server_version').notNull().default(1),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  deletedAt: bigint('deleted_at', { mode: 'number' }),
+}, (table) => ({
+  pharmacyIdx: index('idx_cloud_payments_pharmacy').on(table.pharmacyId),
+  saleIdx: index('idx_cloud_payments_sale').on(table.saleGlobalId),
+  methodIdx: index('idx_cloud_payments_method').on(table.paymentMethod),
+}))
+
+// ============================================================
+// Cloud Inventory Batches
+// ============================================================
+export const cloudInventoryBatches = pgTable('cloud_inventory_batches', {
+  globalId: text('global_id').primaryKey(),
+  pharmacyId: integer('pharmacy_id').notNull(),
+  medicineGlobalId: text('medicine_global_id'),
+  batchNumber: text('batch_number').notNull(),
+  expiryDate: bigint('expiry_date', { mode: 'number' }),
+  purchaseCostCents: integer('purchase_cost_cents').notNull().default(0),
+  payload: jsonb('payload'),
+  version: integer('version').notNull().default(1),
+  serverVersion: integer('server_version').notNull().default(1),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  deletedAt: bigint('deleted_at', { mode: 'number' }),
+}, (table) => ({
+  pharmacyIdx: index('idx_cloud_batches_pharmacy').on(table.pharmacyId),
+  expiryIdx: index('idx_cloud_batches_expiry').on(table.expiryDate),
+}))
+
+// ============================================================
+// Cloud Inventory Balances
+// ============================================================
+export const cloudInventoryBalances = pgTable('cloud_inventory_balances', {
+  globalId: text('global_id').primaryKey(),
+  pharmacyId: integer('pharmacy_id').notNull(),
+  medicineGlobalId: text('medicine_global_id'),
+  batchGlobalId: text('batch_global_id'),
+  location: text('location').notNull().default('shelf'),
+  quantityBase: bigint('quantity_base', { mode: 'number' }).notNull().default(0),
+  payload: jsonb('payload'),
+  version: integer('version').notNull().default(1),
+  serverVersion: integer('server_version').notNull().default(1),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  deletedAt: bigint('deleted_at', { mode: 'number' }),
+}, (table) => ({
+  pharmacyIdx: index('idx_cloud_balances_pharmacy').on(table.pharmacyId),
+  locationIdx: index('idx_cloud_balances_location').on(table.location),
+}))
+
+// ============================================================
 // Cloud Sync Log
 // Tracks all sync operations for audit.
 // ============================================================
@@ -231,4 +318,63 @@ export const pushTokens = pgTable('push_tokens', {
 }, (table) => ({
   tokenIdx: uniqueIndex('idx_push_tokens_token').on(table.token),
   pharmacyIdx: index('idx_push_tokens_pharmacy').on(table.pharmacyId),
+}))
+
+// ============================================================
+// Multi-Tenant SaaS Tables
+// ============================================================
+
+export const cloudTenants = pgTable('cloud_tenants', {
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+  tenantId: text('tenant_id').notNull().unique(), // UUID string
+  pharmacyId: integer('pharmacy_id').unique(),     // Links to legacy pharmacyId (1:1 for MVP)
+  slug: text('slug').notNull().unique(),
+  businessName: text('business_name').notNull(),
+  licenseNumber: text('license_number'),
+  tinNumber: text('tin_number'),
+  phone: text('phone').notNull(),
+  email: text('email'),
+  status: text('status').notNull().default('trial'), // 'trial', 'active', 'grace', 'suspended', 'cancelled'
+  subscriptionPlan: text('subscription_plan').notNull().default('standard'),
+  trialEndsAt: bigint('trial_ends_at', { mode: 'number' }).notNull(),
+  currentPeriodEndsAt: bigint('current_period_ends_at', { mode: 'number' }).notNull(),
+  gracePeriodEndsAt: bigint('grace_period_ends_at', { mode: 'number' }).notNull(),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+}, (table) => ({
+  statusIdx: index('idx_cloud_tenants_status').on(table.status),
+}))
+
+export const cloudTenantLicenses = pgTable('cloud_tenant_licenses', {
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+  tenantId: text('tenant_id').notNull(),
+  activationKey: text('activation_key').notNull().unique(), // e.g. PHARM-XXXX-YYYY
+  deviceFingerprint: text('device_fingerprint'),           // Binds to machine ID
+  deviceName: text('device_name'),
+  signedToken: text('signed_token'),
+  isActive: integer('is_active').notNull().default(1),
+  activatedAt: bigint('activated_at', { mode: 'number' }),
+  lastSeenAt: bigint('last_seen_at', { mode: 'number' }),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+}, (table) => ({
+  tenantIdx: index('idx_cloud_licenses_tenant').on(table.tenantId),
+  keyIdx: uniqueIndex('idx_cloud_licenses_key').on(table.activationKey),
+}))
+
+export const subscriptionPayments = pgTable('subscription_payments', {
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+  tenantId: text('tenant_id').notNull(),
+  amountCents: integer('amount_cents').notNull(),
+  currency: text('currency').notNull().default('ETB'),
+  paymentMethod: text('payment_method').notNull(), // 'bank_transfer', 'telebirr', 'chapa', 'cash'
+  referenceNumber: text('reference_number').notNull(),
+  periodExtendedMonths: integer('period_extended_months').notNull().default(1),
+  status: text('status').notNull().default('completed'), // 'pending', 'completed', 'failed'
+  notes: text('notes'),
+  recordedBy: text('recorded_by'),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+}, (table) => ({
+  tenantIdx: index('idx_subscription_payments_tenant').on(table.tenantId),
+  refIdx: index('idx_subscription_payments_ref').on(table.referenceNumber),
 }))

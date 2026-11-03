@@ -12,6 +12,7 @@ import {
   getExpiry,
   getGrossProfit,
   getSyncStatus,
+  getPharmacistPerformance,
 } from '../services/mobile-queries.js'
 import { pushTokens, cloudEntities } from '../db/schema/index.js'
 import { getDb } from '../db/connection.js'
@@ -135,6 +136,12 @@ export async function mobileRoutes(app: FastifyInstance): Promise<void> {
       const query = request.query as { days?: string }
       const days = query.days ? parseInt(query.days, 10) : 90
       return getExpiry(pharmacyId, Number.isFinite(days) ? days : 90)
+    })
+
+    mobile.get('/api/mobile/pharmacists', async (request: FastifyRequest) => {
+      const pharmacyId = (request as any).pharmacyId as number
+      const { from, to } = rangeParams(request)
+      return getPharmacistPerformance(pharmacyId, from, to)
     })
 
     mobile.get('/api/mobile/reports/gross-profit', async (request: FastifyRequest) => {

@@ -2,7 +2,11 @@ import { eq, and, sql, gte, desc, asc } from 'drizzle-orm'
 import { getDb } from '../db/connection.js'
 import {
   cloudSales,
+  cloudSaleItems,
+  cloudPayments,
   cloudMedicines,
+  cloudInventoryBatches,
+  cloudInventoryBalances,
   cloudReceivingRecords,
   cloudReceivingItems,
   cloudStockAdjustments,
@@ -36,6 +40,8 @@ interface SyncBatchResult {
   appliedSales?: Array<{ receiptNumber: string; totalCents: number }>
 }
 
+type DbExecutor = any
+
 export async function processSyncBatch(
   entries: SyncBatchEntry[],
 ): Promise<SyncBatchResult> {
@@ -43,60 +49,71 @@ export async function processSyncBatch(
   const results: SyncBatchResult['results'] = []
   const appliedSales: Array<{ receiptNumber: string; totalCents: number }> = []
 
-  for (const entry of entries) {
-    try {
-      const result = await processSyncEntry(db, entry)
-      if (result.success && entry.entityType === 'sale' && entry.operation === 'create') {
-        appliedSales.push({
-          receiptNumber: String(entry.payload.receiptNumber ?? ''),
-          totalCents: Number(entry.payload.totalCents ?? 0),
+  // Wrap the entire sync batch in a single atomic database transaction
+  await db.transaction(async (tx: DbExecutor) => {
+    for (const entry of entries) {
+      try {
+        const result = await processSyncEntry(tx, entry)
+        if (result.success && entry.entityType === 'sale' && entry.operation === 'create') {
+          appliedSales.push({
+            receiptNumber: String(entry.payload.receiptNumber ?? ''),
+            totalCents: Number(entry.payload.totalCents ?? 0),
+          })
+        }
+        results.push({
+          globalId: entry.globalId,
+          ...result,
+        })
+
+        // Audit log in the same transaction
+        await tx.insert(cloudSyncLog).values({
+          pharmacyId: entry.pharmacyId,
+          deviceId: entry.deviceId,
+          globalId: entry.globalId,
+          entityType: entry.entityType,
+          operation: entry.operation,
+          status: result.success ? 'success' : result.conflict ? 'conflict' : 'failed',
+          errorMessage: result.error ?? null,
+          createdAt: Date.now(),
+        })
+      } catch (err) {
+        results.push({
+          globalId: entry.globalId,
+          success: false,
+          error: err instanceof Error ? err.message : 'Unknown error during entity processing',
         })
       }
-      results.push({
-        globalId: entry.globalId,
-        ...result,
-      })
-
-      // Log the operation
-      await db.insert(cloudSyncLog).values({
-        pharmacyId: entry.pharmacyId,
-        deviceId: entry.deviceId,
-        globalId: entry.globalId,
-        entityType: entry.entityType,
-        operation: entry.operation,
-        status: result.success ? 'success' : result.conflict ? 'conflict' : 'failed',
-        errorMessage: result.error ?? null,
-        createdAt: Date.now(),
-      })
-    } catch (err) {
-      results.push({
-        globalId: entry.globalId,
-        success: false,
-        error: err instanceof Error ? err.message : 'Unknown error',
-      })
     }
-  }
+  })
 
   return { results, appliedSales }
 }
 
 async function processSyncEntry(
-  db: ReturnType<typeof getDb>,
+  db: DbExecutor,
   entry: SyncBatchEntry,
 ): Promise<{ success: boolean; serverVersion?: number; conflict?: boolean; conflictData?: unknown; error?: string }> {
   const now = Date.now()
 
-  // 1. Generic apply: every entity type lands in cloud_entities (canonical JSON
-  //    store) and genuinely-new versions are appended to the pull outbox.
+  // 1. Generic canonical apply: every entity type lands in cloud_entities
   const generic = await applyGenericEntity(db, entry, now)
   if (generic.stale) {
     return { success: true, serverVersion: generic.serverVersion }
   }
 
+  // 2. Specialized typed projection tables (for SQL performance and analytics)
   if (entry.entityType === 'sale') {
     return processEntitySync(db, cloudSales, entry, now)
+  } else if (entry.entityType === 'sale_item') {
+    return processSaleItemSync(db, entry, now)
+  } else if (entry.entityType === 'payment') {
+    return processPaymentSync(db, entry, now)
   } else if (entry.entityType === 'medicine') {
     return processEntitySync(db, cloudMedicines, entry, now)
+  } else if (entry.entityType === 'inventory_batch') {
+    return processInventoryBatchSync(db, entry, now)
+  } else if (entry.entityType === 'inventory_balance') {
+    return processInventoryBalanceSync(db, entry, now)
   } else if (entry.entityType === 'receiving_record') {
     return processReceivingRecordSync(db, entry, now)
   } else if (entry.entityType === 'receiving_item') {
@@ -104,20 +121,20 @@ async function processSyncEntry(
   } else if (entry.entityType === 'stock_adjustment') {
     return processStockAdjustmentSync(db, entry, now)
   } else {
-    // Generic entities (user, category, unit, unit_alias, inventory_batch,
-    // inventory_balance, sale_item, payment, return, pharmacy, etc.) are
-    // fully persisted into cloud_entities by applyGenericEntity above.
+    // Entities without dedicated tables (categories, units, unit_aliases, user, pharmacy)
+    // are fully recorded in cloud_entities above
     return { success: true, serverVersion: generic.serverVersion ?? 1 }
   }
 }
 
 /**
  * Canonical generic apply: upsert by (pharmacyId, entityType, globalId).
- * - Newer client version wins; retries of the same version are idempotent.
- * - Only genuinely new versions are appended to cloud_sync_queue (outbox).
+ * - Newer client version wins.
+ * - Retries of the same version are idempotent no-ops (serverVersion is not bumped).
+ * - Genuinely new versions are appended to cloud_sync_queue (outbox).
  */
 async function applyGenericEntity(
-  db: ReturnType<typeof getDb>,
+  db: DbExecutor,
   entry: SyncBatchEntry,
   now: number,
 ): Promise<{ stale: boolean; serverVersion?: number }> {
@@ -151,11 +168,18 @@ async function applyGenericEntity(
   }
 
   const record = existing[0]
+
+  // Case 1: Client has older version than server already stored -> ignore silently
   if (entry.version < record.version) {
-    // Older change than the server already has — ignore silently.
     return { stale: true, serverVersion: record.serverVersion }
   }
 
+  // Case 2: Client retried exact same version -> idempotent success without version bump
+  if (entry.version === record.version) {
+    return { stale: false, serverVersion: record.serverVersion }
+  }
+
+  // Case 3: Client has genuinely newer version (entry.version > record.version)
   await db
     .update(cloudEntities)
     .set({
@@ -174,16 +198,12 @@ async function applyGenericEntity(
       ),
     )
 
-  // Only fan out genuinely new versions (equal-version retries are idempotent no-ops)
-  if (entry.version > record.version) {
-    await appendOutbox(db, entry, now)
-  }
-
+  await appendOutbox(db, entry, now)
   return { stale: false, serverVersion: (record.serverVersion ?? 0) + 1 }
 }
 
 async function appendOutbox(
-  db: ReturnType<typeof getDb>,
+  db: DbExecutor,
   entry: SyncBatchEntry,
   now: number,
 ): Promise<void> {
@@ -200,7 +220,7 @@ async function appendOutbox(
 }
 
 async function processEntitySync(
-  db: ReturnType<typeof getDb>,
+  db: DbExecutor,
   table: any,
   entry: SyncBatchEntry,
   now: number,
@@ -208,7 +228,7 @@ async function processEntitySync(
   const existing = await db
     .select()
     .from(table)
-    .where(eq(table.globalId, entry.globalId))
+    .where(and(eq(table.pharmacyId, entry.pharmacyId), eq(table.globalId, entry.globalId)))
     .limit(1)
 
   if (entry.operation === 'delete') {
@@ -216,28 +236,27 @@ async function processEntitySync(
       await db
         .update(table)
         .set({ deletedAt: now, updatedAt: now, serverVersion: sql`${table.serverVersion} + 1` })
-        .where(eq(table.globalId, entry.globalId))
+        .where(and(eq(table.pharmacyId, entry.pharmacyId), eq(table.globalId, entry.globalId)))
     }
     return { success: true }
   }
 
   if (existing.length === 0) {
-    // Create new record
     const newRecord = {
       globalId: entry.globalId,
       pharmacyId: entry.pharmacyId,
       localId: entry.payload.id as number,
       ...(entry.entityType === 'sale'
         ? {
-            receiptNumber: entry.payload.receiptNumber as string ?? '',
-            status: entry.payload.status as string ?? 'completed',
-            subtotalCents: entry.payload.subtotalCents as number ?? 0,
-            totalCents: entry.payload.totalCents as number ?? 0,
-            soldByUserId: entry.payload.soldByUserId as number ?? null,
-            soldAt: entry.payload.soldAt as number ?? now,
+            receiptNumber: (entry.payload.receiptNumber as string) ?? '',
+            status: (entry.payload.status as string) ?? 'completed',
+            subtotalCents: (entry.payload.subtotalCents as number) ?? 0,
+            totalCents: (entry.payload.totalCents as number) ?? 0,
+            soldByUserId: (entry.payload.soldByUserId as number) ?? null,
+            soldAt: (entry.payload.soldAt as number) ?? now,
           }
         : {
-            name: entry.payload.name as string ?? 'Unknown',
+            name: (entry.payload.name as string) ?? 'Unknown',
           }),
       payload: entry.payload,
       version: entry.version,
@@ -252,23 +271,11 @@ async function processEntitySync(
   }
 
   const existingRecord = existing[0]
-  const localVersion = entry.version
-  const serverVersion = existingRecord.serverVersion ?? 0
-
-  // Conflict detection
-  if (localVersion < serverVersion) {
-    // There's a conflict — remote has newer version
-    return {
-      success: false,
-      conflict: true,
-      conflictData: {
-        serverVersion: serverVersion,
-        remotePayload: existingRecord.payload,
-      },
-    }
+  if (entry.version <= existingRecord.version) {
+    // Idempotent retry or older change
+    return { success: true, serverVersion: existingRecord.serverVersion ?? 1 }
   }
 
-  // No conflict or local is newer — update
   const updateData: Record<string, unknown> = {
     payload: entry.payload,
     version: entry.version,
@@ -286,21 +293,237 @@ async function processEntitySync(
   await db
     .update(table)
     .set(updateData)
-    .where(eq(table.globalId, entry.globalId))
+    .where(and(eq(table.pharmacyId, entry.pharmacyId), eq(table.globalId, entry.globalId)))
 
-  const newServerVersion = (existingRecord.serverVersion ?? 0) + 1
-  return { success: true, serverVersion: newServerVersion }
+  return { success: true, serverVersion: (existingRecord.serverVersion ?? 0) + 1 }
+}
+
+async function processSaleItemSync(
+  db: DbExecutor,
+  entry: SyncBatchEntry,
+  now: number,
+): Promise<{ success: boolean; serverVersion?: number }> {
+  const existing = await db
+    .select()
+    .from(cloudSaleItems)
+    .where(and(eq(cloudSaleItems.pharmacyId, entry.pharmacyId), eq(cloudSaleItems.globalId, entry.globalId)))
+    .limit(1)
+
+  if (entry.operation === 'delete') {
+    if (existing.length > 0) {
+      await db
+        .update(cloudSaleItems)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(and(eq(cloudSaleItems.pharmacyId, entry.pharmacyId), eq(cloudSaleItems.globalId, entry.globalId)))
+    }
+    return { success: true }
+  }
+
+  if (existing.length === 0) {
+    await db.insert(cloudSaleItems).values({
+      globalId: entry.globalId,
+      pharmacyId: entry.pharmacyId,
+      saleGlobalId: (entry.payload.saleGlobalId as string) ?? null,
+      medicineGlobalId: (entry.payload.medicineGlobalId as string) ?? null,
+      medicineName: (entry.payload.medicineName as string) ?? null,
+      quantity: (entry.payload.quantity as number) ?? 1,
+      unitPriceCents: (entry.payload.unitPriceCents as number) ?? 0,
+      totalPriceCents: (entry.payload.totalPriceCents as number) ?? 0,
+      payload: entry.payload,
+      version: entry.version,
+      serverVersion: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    return { success: true, serverVersion: 1 }
+  }
+
+  await db
+    .update(cloudSaleItems)
+    .set({
+      quantity: (entry.payload.quantity as number) ?? existing[0].quantity,
+      unitPriceCents: (entry.payload.unitPriceCents as number) ?? existing[0].unitPriceCents,
+      totalPriceCents: (entry.payload.totalPriceCents as number) ?? existing[0].totalPriceCents,
+      payload: entry.payload,
+      version: entry.version,
+      serverVersion: sql`${cloudSaleItems.serverVersion} + 1`,
+      updatedAt: now,
+    })
+    .where(and(eq(cloudSaleItems.pharmacyId, entry.pharmacyId), eq(cloudSaleItems.globalId, entry.globalId)))
+
+  return { success: true, serverVersion: (existing[0].serverVersion ?? 0) + 1 }
+}
+
+async function processPaymentSync(
+  db: DbExecutor,
+  entry: SyncBatchEntry,
+  now: number,
+): Promise<{ success: boolean; serverVersion?: number }> {
+  const existing = await db
+    .select()
+    .from(cloudPayments)
+    .where(and(eq(cloudPayments.pharmacyId, entry.pharmacyId), eq(cloudPayments.globalId, entry.globalId)))
+    .limit(1)
+
+  if (entry.operation === 'delete') {
+    if (existing.length > 0) {
+      await db
+        .update(cloudPayments)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(and(eq(cloudPayments.pharmacyId, entry.pharmacyId), eq(cloudPayments.globalId, entry.globalId)))
+    }
+    return { success: true }
+  }
+
+  if (existing.length === 0) {
+    await db.insert(cloudPayments).values({
+      globalId: entry.globalId,
+      pharmacyId: entry.pharmacyId,
+      saleGlobalId: (entry.payload.saleGlobalId as string) ?? null,
+      paymentMethod: (entry.payload.paymentMethod as string) ?? 'cash',
+      amountCents: (entry.payload.amountCents as number) ?? 0,
+      referenceNumber: (entry.payload.referenceNumber as string) ?? null,
+      payload: entry.payload,
+      version: entry.version,
+      serverVersion: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    return { success: true, serverVersion: 1 }
+  }
+
+  await db
+    .update(cloudPayments)
+    .set({
+      paymentMethod: (entry.payload.paymentMethod as string) ?? existing[0].paymentMethod,
+      amountCents: (entry.payload.amountCents as number) ?? existing[0].amountCents,
+      referenceNumber: (entry.payload.referenceNumber as string) ?? existing[0].referenceNumber,
+      payload: entry.payload,
+      version: entry.version,
+      serverVersion: sql`${cloudPayments.serverVersion} + 1`,
+      updatedAt: now,
+    })
+    .where(and(eq(cloudPayments.pharmacyId, entry.pharmacyId), eq(cloudPayments.globalId, entry.globalId)))
+
+  return { success: true, serverVersion: (existing[0].serverVersion ?? 0) + 1 }
+}
+
+async function processInventoryBatchSync(
+  db: DbExecutor,
+  entry: SyncBatchEntry,
+  now: number,
+): Promise<{ success: boolean; serverVersion?: number }> {
+  const existing = await db
+    .select()
+    .from(cloudInventoryBatches)
+    .where(and(eq(cloudInventoryBatches.pharmacyId, entry.pharmacyId), eq(cloudInventoryBatches.globalId, entry.globalId)))
+    .limit(1)
+
+  if (entry.operation === 'delete') {
+    if (existing.length > 0) {
+      await db
+        .update(cloudInventoryBatches)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(and(eq(cloudInventoryBatches.pharmacyId, entry.pharmacyId), eq(cloudInventoryBatches.globalId, entry.globalId)))
+    }
+    return { success: true }
+  }
+
+  if (existing.length === 0) {
+    await db.insert(cloudInventoryBatches).values({
+      globalId: entry.globalId,
+      pharmacyId: entry.pharmacyId,
+      medicineGlobalId: (entry.payload.medicineGlobalId as string) ?? null,
+      batchNumber: (entry.payload.batchNumber as string) ?? 'UNKNOWN',
+      expiryDate: (entry.payload.expiryDate as number) ?? null,
+      purchaseCostCents: (entry.payload.purchaseCostCents as number) ?? 0,
+      payload: entry.payload,
+      version: entry.version,
+      serverVersion: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    return { success: true, serverVersion: 1 }
+  }
+
+  await db
+    .update(cloudInventoryBatches)
+    .set({
+      batchNumber: (entry.payload.batchNumber as string) ?? existing[0].batchNumber,
+      expiryDate: (entry.payload.expiryDate as number) ?? existing[0].expiryDate,
+      purchaseCostCents: (entry.payload.purchaseCostCents as number) ?? existing[0].purchaseCostCents,
+      payload: entry.payload,
+      version: entry.version,
+      serverVersion: sql`${cloudInventoryBatches.serverVersion} + 1`,
+      updatedAt: now,
+    })
+    .where(and(eq(cloudInventoryBatches.pharmacyId, entry.pharmacyId), eq(cloudInventoryBatches.globalId, entry.globalId)))
+
+  return { success: true, serverVersion: (existing[0].serverVersion ?? 0) + 1 }
+}
+
+async function processInventoryBalanceSync(
+  db: DbExecutor,
+  entry: SyncBatchEntry,
+  now: number,
+): Promise<{ success: boolean; serverVersion?: number }> {
+  const existing = await db
+    .select()
+    .from(cloudInventoryBalances)
+    .where(and(eq(cloudInventoryBalances.pharmacyId, entry.pharmacyId), eq(cloudInventoryBalances.globalId, entry.globalId)))
+    .limit(1)
+
+  if (entry.operation === 'delete') {
+    if (existing.length > 0) {
+      await db
+        .update(cloudInventoryBalances)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(and(eq(cloudInventoryBalances.pharmacyId, entry.pharmacyId), eq(cloudInventoryBalances.globalId, entry.globalId)))
+    }
+    return { success: true }
+  }
+
+  if (existing.length === 0) {
+    await db.insert(cloudInventoryBalances).values({
+      globalId: entry.globalId,
+      pharmacyId: entry.pharmacyId,
+      medicineGlobalId: (entry.payload.medicineGlobalId as string) ?? null,
+      batchGlobalId: (entry.payload.batchGlobalId as string) ?? null,
+      location: (entry.payload.location as string) ?? 'shelf',
+      quantityBase: (entry.payload.quantityBase as number) ?? 0,
+      payload: entry.payload,
+      version: entry.version,
+      serverVersion: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    return { success: true, serverVersion: 1 }
+  }
+
+  await db
+    .update(cloudInventoryBalances)
+    .set({
+      location: (entry.payload.location as string) ?? existing[0].location,
+      quantityBase: (entry.payload.quantityBase as number) ?? existing[0].quantityBase,
+      payload: entry.payload,
+      version: entry.version,
+      serverVersion: sql`${cloudInventoryBalances.serverVersion} + 1`,
+      updatedAt: now,
+    })
+    .where(and(eq(cloudInventoryBalances.pharmacyId, entry.pharmacyId), eq(cloudInventoryBalances.globalId, entry.globalId)))
+
+  return { success: true, serverVersion: (existing[0].serverVersion ?? 0) + 1 }
 }
 
 async function processReceivingRecordSync(
-  db: ReturnType<typeof getDb>,
+  db: DbExecutor,
   entry: SyncBatchEntry,
   now: number,
 ): Promise<{ success: boolean; serverVersion?: number; conflict?: boolean; conflictData?: unknown; error?: string }> {
   const existing = await db
     .select()
     .from(cloudReceivingRecords)
-    .where(eq(cloudReceivingRecords.globalId, entry.globalId))
+    .where(and(eq(cloudReceivingRecords.pharmacyId, entry.pharmacyId), eq(cloudReceivingRecords.globalId, entry.globalId)))
     .limit(1)
 
   if (entry.operation === 'delete') {
@@ -308,7 +531,7 @@ async function processReceivingRecordSync(
       await db
         .update(cloudReceivingRecords)
         .set({ deletedAt: now, updatedAt: now, serverVersion: sql`${cloudReceivingRecords.serverVersion} + 1` })
-        .where(eq(cloudReceivingRecords.globalId, entry.globalId))
+        .where(and(eq(cloudReceivingRecords.pharmacyId, entry.pharmacyId), eq(cloudReceivingRecords.globalId, entry.globalId)))
     }
     return { success: true }
   }
@@ -333,20 +556,9 @@ async function processReceivingRecordSync(
     return { success: true, serverVersion: 1 }
   }
 
-  // Update existing
   const existingRecord = existing[0]
-  const localVersion = entry.version
-  const serverVersion = existingRecord.serverVersion ?? 0
-
-  if (localVersion < serverVersion) {
-    return {
-      success: false,
-      conflict: true,
-      conflictData: {
-        serverVersion,
-        remotePayload: existingRecord.payload,
-      },
-    }
+  if (entry.version <= existingRecord.version) {
+    return { success: true, serverVersion: existingRecord.serverVersion ?? 1 }
   }
 
   await db
@@ -360,20 +572,20 @@ async function processReceivingRecordSync(
       invoiceNumber: (entry.payload.invoiceNumber as string) ?? existingRecord.invoiceNumber,
       destination: (entry.payload.destination as string) ?? existingRecord.destination,
     })
-    .where(eq(cloudReceivingRecords.globalId, entry.globalId))
+    .where(and(eq(cloudReceivingRecords.pharmacyId, entry.pharmacyId), eq(cloudReceivingRecords.globalId, entry.globalId)))
 
   return { success: true, serverVersion: (existingRecord.serverVersion ?? 0) + 1 }
 }
 
 async function processReceivingItemSync(
-  db: ReturnType<typeof getDb>,
+  db: DbExecutor,
   entry: SyncBatchEntry,
   now: number,
 ): Promise<{ success: boolean; serverVersion?: number; conflict?: boolean; conflictData?: unknown; error?: string }> {
   const existing = await db
     .select()
     .from(cloudReceivingItems)
-    .where(eq(cloudReceivingItems.globalId, entry.globalId))
+    .where(and(eq(cloudReceivingItems.pharmacyId, entry.pharmacyId), eq(cloudReceivingItems.globalId, entry.globalId)))
     .limit(1)
 
   if (entry.operation === 'delete') {
@@ -381,7 +593,7 @@ async function processReceivingItemSync(
       await db
         .update(cloudReceivingItems)
         .set({ deletedAt: now, updatedAt: now, serverVersion: sql`${cloudReceivingItems.serverVersion} + 1` })
-        .where(eq(cloudReceivingItems.globalId, entry.globalId))
+        .where(and(eq(cloudReceivingItems.pharmacyId, entry.pharmacyId), eq(cloudReceivingItems.globalId, entry.globalId)))
     }
     return { success: true }
   }
@@ -390,7 +602,7 @@ async function processReceivingItemSync(
     await db.insert(cloudReceivingItems).values({
       globalId: entry.globalId,
       pharmacyId: entry.pharmacyId,
-      localId: null,
+      localId: entry.payload.id as number,
       receivingRecordGlobalId: (entry.payload.receivingRecordGlobalId as string) ?? null,
       medicineId: (entry.payload.medicineId as number) ?? 0,
       medicineGlobalId: (entry.payload.medicineGlobalId as string) ?? null,
@@ -411,18 +623,8 @@ async function processReceivingItemSync(
   }
 
   const existingRecord = existing[0]
-  const localVersion = entry.version
-  const serverVersion = existingRecord.serverVersion ?? 0
-
-  if (localVersion < serverVersion) {
-    return {
-      success: false,
-      conflict: true,
-      conflictData: {
-        serverVersion,
-        remotePayload: existingRecord.payload,
-      },
-    }
+  if (entry.version <= existingRecord.version) {
+    return { success: true, serverVersion: existingRecord.serverVersion ?? 1 }
   }
 
   await db
@@ -433,20 +635,20 @@ async function processReceivingItemSync(
       serverVersion: sql`${cloudReceivingItems.serverVersion} + 1`,
       updatedAt: now,
     })
-    .where(eq(cloudReceivingItems.globalId, entry.globalId))
+    .where(and(eq(cloudReceivingItems.pharmacyId, entry.pharmacyId), eq(cloudReceivingItems.globalId, entry.globalId)))
 
   return { success: true, serverVersion: (existingRecord.serverVersion ?? 0) + 1 }
 }
 
 async function processStockAdjustmentSync(
-  db: ReturnType<typeof getDb>,
+  db: DbExecutor,
   entry: SyncBatchEntry,
   now: number,
 ): Promise<{ success: boolean; serverVersion?: number; conflict?: boolean; conflictData?: unknown; error?: string }> {
   const existing = await db
     .select()
     .from(cloudStockAdjustments)
-    .where(eq(cloudStockAdjustments.globalId, entry.globalId))
+    .where(and(eq(cloudStockAdjustments.pharmacyId, entry.pharmacyId), eq(cloudStockAdjustments.globalId, entry.globalId)))
     .limit(1)
 
   if (entry.operation === 'delete') {
@@ -454,7 +656,7 @@ async function processStockAdjustmentSync(
       await db
         .update(cloudStockAdjustments)
         .set({ deletedAt: now, updatedAt: now, serverVersion: sql`${cloudStockAdjustments.serverVersion} + 1` })
-        .where(eq(cloudStockAdjustments.globalId, entry.globalId))
+        .where(and(eq(cloudStockAdjustments.pharmacyId, entry.pharmacyId), eq(cloudStockAdjustments.globalId, entry.globalId)))
     }
     return { success: true }
   }
@@ -485,18 +687,8 @@ async function processStockAdjustmentSync(
   }
 
   const existingRecord = existing[0]
-  const localVersion = entry.version
-  const serverVersion = existingRecord.serverVersion ?? 0
-
-  if (localVersion < serverVersion) {
-    return {
-      success: false,
-      conflict: true,
-      conflictData: {
-        serverVersion,
-        remotePayload: existingRecord.payload,
-      },
-    }
+  if (entry.version <= existingRecord.version) {
+    return { success: true, serverVersion: existingRecord.serverVersion ?? 1 }
   }
 
   await db
@@ -507,7 +699,7 @@ async function processStockAdjustmentSync(
       serverVersion: sql`${cloudStockAdjustments.serverVersion} + 1`,
       updatedAt: now,
     })
-    .where(eq(cloudStockAdjustments.globalId, entry.globalId))
+    .where(and(eq(cloudStockAdjustments.pharmacyId, entry.pharmacyId), eq(cloudStockAdjustments.globalId, entry.globalId)))
 
   return { success: true, serverVersion: (existingRecord.serverVersion ?? 0) + 1 }
 }
