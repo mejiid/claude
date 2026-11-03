@@ -364,8 +364,9 @@ export async function getLowStock(
     perMedicine.set(medGid, entry)
   }
 
-  const allItems = Array.from(perMedicine.values())
-    .map((entry) => ({
+  const allItems = Array.from(perMedicine.entries())
+    .map(([medGid, entry]) => ({
+      medicineGlobalId: medGid,
       medicineName: entry.name,
       storeQty: Math.max(0, Math.round(entry.store)),
       dispatcherQty: Math.max(0, Math.round(entry.dispatcher)),
