@@ -299,10 +299,16 @@ export async function getSaleDetail(pharmacyId: number, globalId: string) {
 export interface LowStockResult {
   generatedAt: number
   threshold: number
+  lowStockCount: number
+  depletedCount: number
   items: Array<{ medicineName: string; storeQty: number; dispatcherQty: number; totalQty: number }>
 }
 
-export async function getLowStock(pharmacyId: number, threshold = 10): Promise<LowStockResult> {
+export async function getLowStock(
+  pharmacyId: number,
+  threshold = 5,
+  includeZero = false,
+): Promise<LowStockResult> {
   const [balances, medicines] = await Promise.all([
     fetchEntities(pharmacyId, 'inventory_balance'),
     fetchEntities(pharmacyId, 'medicine'),
@@ -358,17 +364,28 @@ export async function getLowStock(pharmacyId: number, threshold = 10): Promise<L
     perMedicine.set(medGid, entry)
   }
 
-  const items = Array.from(perMedicine.values())
+  const allItems = Array.from(perMedicine.values())
     .map((entry) => ({
       medicineName: entry.name,
       storeQty: Math.max(0, Math.round(entry.store)),
       dispatcherQty: Math.max(0, Math.round(entry.dispatcher)),
       totalQty: Math.max(0, Math.round(entry.store + entry.dispatcher)),
     }))
-    .filter((x) => x.totalQty <= threshold)
-    .sort((a, b) => a.totalQty - b.totalQty)
 
-  return { generatedAt: Date.now(), threshold, items }
+  const lowStockItems = allItems.filter((x) => x.totalQty > 0 && x.totalQty <= threshold)
+  const depletedItems = allItems.filter((x) => x.totalQty === 0)
+
+  const items = includeZero
+    ? allItems.filter((x) => x.totalQty <= threshold).sort((a, b) => a.totalQty - b.totalQty)
+    : lowStockItems.sort((a, b) => a.totalQty - b.totalQty)
+
+  return {
+    generatedAt: Date.now(),
+    threshold,
+    lowStockCount: lowStockItems.length,
+    depletedCount: depletedItems.length,
+    items,
+  }
 }
 
 export interface ExpiryResult {

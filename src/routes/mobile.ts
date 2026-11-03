@@ -126,9 +126,10 @@ export async function mobileRoutes(app: FastifyInstance): Promise<void> {
 
     mobile.get('/api/mobile/stock/low', async (request: FastifyRequest) => {
       const pharmacyId = (request as any).pharmacyId as number
-      const query = request.query as { threshold?: string }
+      const query = request.query as { threshold?: string; includeZero?: string }
       const threshold = query.threshold ? parseInt(query.threshold, 10) : 5
-      return getLowStock(pharmacyId, Number.isFinite(threshold) ? threshold : 5)
+      const includeZero = query.includeZero === 'true' || query.includeZero === '1'
+      return getLowStock(pharmacyId, Number.isFinite(threshold) ? threshold : 5, includeZero)
     })
 
     mobile.get('/api/mobile/stock/expiry', async (request: FastifyRequest) => {
