@@ -1,7 +1,7 @@
 import { and, eq, isNull } from 'drizzle-orm'
 import bcrypt from 'bcryptjs'
 import { getDb } from '../db/connection.js'
-import { cloudEntities } from '../db/schema/index.js'
+import { cloudEntities, cloudSales } from '../db/schema/index.js'
 
 type EntityRow = {
   globalId: string
@@ -24,11 +24,48 @@ async function fetchEntities(
         isNull(cloudEntities.deletedAt),
       ),
     )
-  return rows.map((r) => ({
+  const result: EntityRow[] = rows.map((r) => ({
     globalId: r.globalId,
     payload: (r.payload ?? {}) as Record<string, unknown>,
     appliedAt: r.appliedAt,
   }))
+
+  if (entityType === 'sale') {
+    try {
+      const dbSales = await db
+        .select()
+        .from(cloudSales)
+        .where(and(eq(cloudSales.pharmacyId, pharmacyId), isNull(cloudSales.deletedAt)))
+      const existingGids = new Set(result.map((r) => r.globalId))
+      for (const s of dbSales) {
+        if (!existingGids.has(s.globalId)) {
+          result.push({
+            globalId: s.globalId,
+            payload: {
+              ...((s.payload as Record<string, unknown>) ?? {}),
+              receiptNumber: s.receiptNumber,
+              receipt_number: s.receiptNumber,
+              totalCents: s.totalCents,
+              total_cents: s.totalCents,
+              subtotalCents: s.subtotalCents,
+              subtotal_cents: s.subtotalCents,
+              soldAt: s.soldAt,
+              sold_at: s.soldAt,
+              soldByUserId: s.soldByUserId,
+              sold_by_user_id: s.soldByUserId,
+              status: s.status,
+            },
+            appliedAt: s.soldAt,
+          })
+          existingGids.add(s.globalId)
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  return result
 }
 
 function num(value: unknown): number {
@@ -37,6 +74,26 @@ function num(value: unknown): number {
 
 function str(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+export function getSaleSoldAt(payload: Record<string, unknown>, fallback = 0): number {
+  return num(payload.soldAt) || num(payload.sold_at) || fallback
+}
+
+export function getSaleTotalCents(payload: Record<string, unknown>): number {
+  return num(payload.totalCents) || num(payload.total_cents)
+}
+
+export function getSaleReceiptNumber(payload: Record<string, unknown>): string {
+  return str(payload.receiptNumber) || str(payload.receipt_number)
+}
+
+export function getSaleSoldByUserId(payload: Record<string, unknown>): number {
+  return num(payload.soldByUserId) || num(payload.sold_by_user_id)
+}
+
+export function getSaleStatus(payload: Record<string, unknown>): string {
+  return str(payload.status) || 'completed'
 }
 
 export interface MobileLoginResult {
@@ -101,10 +158,10 @@ function totalsForWindow(
   to: number,
 ): BreakdownTotals {
   const salesInWindow = sales.filter((s) => {
-    const soldAt = num(s.payload.soldAt)
-    return soldAt >= from && soldAt <= to && s.payload.status !== 'cancelled'
+    const soldAt = getSaleSoldAt(s.payload, s.appliedAt)
+    return soldAt >= from && soldAt <= to && getSaleStatus(s.payload) !== 'cancelled'
   })
-  const grossCents = salesInWindow.reduce((sum, s) => sum + num(s.payload.totalCents), 0)
+  const grossCents = salesInWindow.reduce((sum, s) => sum + getSaleTotalCents(s.payload), 0)
 
   const events = paymentEvents.filter((p) => num(p.payload['createdAt']) >= from && num(p.payload['createdAt']) <= to)
   const refundsCents = events
@@ -208,14 +265,14 @@ export async function getSalesHistory(
   }
 
   const inRange = sales.filter((s) => {
-    const soldAt = num(s.payload.soldAt)
+    const soldAt = getSaleSoldAt(s.payload, s.appliedAt)
     return soldAt >= from && soldAt <= to
   })
-  inRange.sort((a, b) => num(b.payload.soldAt) - num(a.payload.soldAt))
+  inRange.sort((a, b) => getSaleSoldAt(b.payload, b.appliedAt) - getSaleSoldAt(a.payload, a.appliedAt))
 
   const totalSalesCents = inRange
-    .filter((s) => s.payload.status !== 'cancelled')
-    .reduce((sum, s) => sum + num(s.payload.totalCents), 0)
+    .filter((s) => getSaleStatus(s.payload) !== 'cancelled')
+    .reduce((sum, s) => sum + getSaleTotalCents(s.payload), 0)
   const totalRefundsCents = paymentEvents
     .filter(
       (p) =>
@@ -239,11 +296,11 @@ export async function getSalesHistory(
     pageSize,
     sales: pageRows.map((s) => ({
       globalId: s.globalId,
-      receiptNumber: str(s.payload.receiptNumber),
-      soldAt: num(s.payload.soldAt),
-      totalCents: num(s.payload.totalCents),
-      status: str(s.payload.status),
-      pharmacistName: userByLocalId.get(num(s.payload.soldByUserId)) ?? 'Unknown',
+      receiptNumber: getSaleReceiptNumber(s.payload),
+      soldAt: getSaleSoldAt(s.payload, s.appliedAt),
+      totalCents: getSaleTotalCents(s.payload),
+      status: getSaleStatus(s.payload),
+      pharmacistName: userByLocalId.get(getSaleSoldByUserId(s.payload)) ?? 'Unknown',
     })),
   }
 }
@@ -280,10 +337,10 @@ export async function getSaleDetail(pharmacyId: number, globalId: string) {
     generatedAt: Date.now(),
     sale: {
       globalId: sale.globalId,
-      receiptNumber: str(sale.payload.receiptNumber),
-      soldAt: num(sale.payload.soldAt),
-      status: str(sale.payload.status),
-      totalCents: num(sale.payload.totalCents),
+      receiptNumber: getSaleReceiptNumber(sale.payload),
+      soldAt: getSaleSoldAt(sale.payload, sale.appliedAt),
+      status: getSaleStatus(sale.payload),
+      totalCents: getSaleTotalCents(sale.payload),
     },
     items: saleItems,
     payment: payment
@@ -531,14 +588,14 @@ export async function getPharmacistPerformance(
   const performanceMap = new Map<number, { count: number; totalCents: number }>()
 
   for (const s of sales) {
-    if (s.payload.status === 'cancelled') continue
-    const soldAt = num(s.payload.soldAt)
+    if (getSaleStatus(s.payload) === 'cancelled') continue
+    const soldAt = getSaleSoldAt(s.payload, s.appliedAt)
     if (soldAt < from || soldAt > to) continue
 
-    const userId = num(s.payload.soldByUserId) || 0
+    const userId = getSaleSoldByUserId(s.payload) || 0
     const current = performanceMap.get(userId) ?? { count: 0, totalCents: 0 }
     current.count += 1
-    current.totalCents += num(s.payload.totalCents)
+    current.totalCents += getSaleTotalCents(s.payload)
     performanceMap.set(userId, current)
   }
 
