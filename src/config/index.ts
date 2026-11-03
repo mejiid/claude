@@ -24,9 +24,9 @@ export const config = {
     masterKey: process.env.MASTER_API_KEY ?? 'pharmacy-master-key-change-me',
   },
 
-  // Rate limiting
+  // Rate limiting (generous default for multi-device sync and real-time dashboard)
   rateLimit: {
-    max: parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10),
+    max: parseInt(process.env.RATE_LIMIT_MAX ?? '1200', 10),
     timeWindow: parseInt(process.env.RATE_LIMIT_WINDOW ?? '60000', 10), // 1 minute
   },
 

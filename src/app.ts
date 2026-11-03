@@ -24,10 +24,22 @@ export async function buildApp() {
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   })
 
-  // Rate limiting
+  // Rate limiting with per-token keying and generous thresholds
   await app.register(rateLimit, {
     max: config.rateLimit.max,
     timeWindow: config.rateLimit.timeWindow,
+    keyGenerator: (req) => {
+      // Key by Bearer auth token if authenticated so mobile owner and counter desktop
+      // don't share or exhaust the same NAT router IP quota
+      const auth = req.headers['authorization']
+      if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+        return auth
+      }
+      return req.ip
+    },
+    allowList: (req) => {
+      return req.url === '/health' || req.url === '/api/health'
+    },
   })
 
   // WebSocket support
