@@ -100,8 +100,11 @@ export async function mobileRoutes(app: FastifyInstance): Promise<void> {
     mobile.addHook('preHandler', mobileAuthMiddleware)
 
     mobile.get('/api/mobile/dashboard', async (request: FastifyRequest) => {
-      const pharmacyId = (request as any).pharmacyId as number
-      return getDashboard(pharmacyId)
+      const pharmacyId = Number((request as any).pharmacyId)
+      const query = request.query as { from?: string; to?: string }
+      const from = query.from ? parseInt(query.from, 10) : undefined
+      const to = query.to ? parseInt(query.to, 10) : undefined
+      return getDashboard(pharmacyId, from, to)
     })
 
     mobile.get('/api/mobile/sales', async (request: FastifyRequest) => {
@@ -180,7 +183,7 @@ export async function mobileRoutes(app: FastifyInstance): Promise<void> {
       if (existing.length > 0) {
         await db
           .update(pushTokens)
-          .set({ muted, userId, updatedAt: now })
+          .set({ pharmacyId: Number(pharmacyId), muted, userId, updatedAt: now })
           .where(eq(pushTokens.token, devicePushValue))
       } else {
         const values: Record<string, unknown> = {

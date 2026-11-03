@@ -21,11 +21,12 @@ export async function notifyNewSales(
   if (sales.length === 0) return
 
   try {
+    const pId = Number(pharmacyId)
     const db = getDb()
     const tokens = await db
       .select()
       .from(pushTokens)
-      .where(and(eq(pushTokens.pharmacyId, pharmacyId), eq(pushTokens.muted, 0)))
+      .where(and(eq(pushTokens.pharmacyId, pId), eq(pushTokens.muted, 0)))
 
     if (tokens.length === 0) return
 
@@ -42,6 +43,7 @@ export async function notifyNewSales(
           body: `Birr ${amount} · ${sale.receiptNumber}`,
           sound: 'default',
           priority: 'high',
+          channelId: 'sales',
           data: { type: 'sale', receiptNumber: sale.receiptNumber },
         })
       }
@@ -51,10 +53,11 @@ export async function notifyNewSales(
     for (const chunk of chunks) {
       const tickets = await expo.sendPushNotificationsAsync(chunk)
       // Prune tokens Expo reports as unregistered
-      for (const ticket of tickets) {
-        if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
-          const failedTo = (ticket as { to?: string }).to
-          if (failedTo) {
+      for (let i = 0; i < tickets.length; i++) {
+        const ticket = tickets[i]
+        if (ticket && ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
+          const failedTo = chunk[i]?.to
+          if (failedTo && typeof failedTo === 'string') {
             await db.delete(pushTokens).where(eq(pushTokens.token, failedTo))
           }
         }

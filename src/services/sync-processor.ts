@@ -62,8 +62,8 @@ export async function processSyncBatch(
         const result = await processSyncEntry(tx, entry)
         if (result.success && entry.entityType === 'sale' && entry.operation === 'create') {
           appliedSales.push({
-            receiptNumber: String(entry.payload.receiptNumber ?? ''),
-            totalCents: Number(entry.payload.totalCents ?? 0),
+            receiptNumber: String(entry.payload.receiptNumber ?? entry.payload.receipt_number ?? ''),
+            totalCents: Number(entry.payload.totalCents ?? entry.payload.total_cents ?? 0),
           })
         }
         results.push({

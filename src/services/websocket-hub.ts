@@ -30,10 +30,12 @@ class WebSocketHub {
    * Register a new authenticated WebSocket client.
    */
   register(client: ConnectedClient): void {
-    let pharmacyClients = this.clients.get(client.pharmacyId)
+    const pId = Number(client.pharmacyId)
+    client.pharmacyId = pId
+    let pharmacyClients = this.clients.get(pId)
     if (!pharmacyClients) {
       pharmacyClients = new Set()
-      this.clients.set(client.pharmacyId, pharmacyClients)
+      this.clients.set(pId, pharmacyClients)
     }
     pharmacyClients.add(client)
 
@@ -57,11 +59,12 @@ class WebSocketHub {
    * Unregister a disconnected client.
    */
   unregister(client: ConnectedClient): void {
-    const pharmacyClients = this.clients.get(client.pharmacyId)
+    const pId = Number(client.pharmacyId)
+    const pharmacyClients = this.clients.get(pId)
     if (pharmacyClients) {
       pharmacyClients.delete(client)
       if (pharmacyClients.size === 0) {
-        this.clients.delete(client.pharmacyId)
+        this.clients.delete(pId)
       }
     }
     console.log(
@@ -73,7 +76,8 @@ class WebSocketHub {
    * Broadcast a real-time event to all connected clients of a pharmacy.
    */
   broadcastToPharmacy<T>(pharmacyId: number, type: string, payload: T): void {
-    const pharmacyClients = this.clients.get(pharmacyId)
+    const pId = Number(pharmacyId)
+    const pharmacyClients = this.clients.get(pId)
     if (!pharmacyClients || pharmacyClients.size === 0) return
 
     const message: RealtimeMessage<T> = {

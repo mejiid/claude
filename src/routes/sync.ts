@@ -31,7 +31,7 @@ export async function syncRoutes(app: FastifyInstance): Promise<void> {
       return
     }
 
-    const pharmacyId = (request as any).pharmacyId
+    const pharmacyId = Number((request as any).pharmacyId)
 
     // Ensure all entries are attributed to the authenticated pharmacy session
     for (const entry of entries) {

@@ -199,15 +199,19 @@ function totalsForWindow(
   }
 }
 
-export async function getDashboard(pharmacyId: number) {
+export async function getDashboard(pharmacyId: number, from?: number, to?: number) {
   const [sales, paymentEvents] = await Promise.all([
     fetchEntities(pharmacyId, 'sale'),
     fetchEntities(pharmacyId, 'payment'),
   ])
 
   const now = new Date()
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const today = dayRange(todayStart)
+  const todayStart = from !== undefined
+    ? from
+    : new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const today = to !== undefined
+    ? { from: todayStart, to }
+    : dayRange(todayStart)
   const yesterday = dayRange(todayStart - 86400000)
 
   const todayTotals = totalsForWindow(sales, paymentEvents, today.from, today.to)
