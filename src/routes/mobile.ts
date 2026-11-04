@@ -207,6 +207,15 @@ export async function mobileRoutes(app: FastifyInstance): Promise<void> {
       const pharmacyId = (request as any).pharmacyId as number
       try {
         const result = await sendTestNotification(pharmacyId)
+        if (result.targets === 0) {
+          reply.status(400).send({
+            ok: false,
+            error: 'No active push tokens registered for this pharmacy yet. Open the mobile app to register this device.',
+            sentCount: 0,
+            targetCount: 0,
+          })
+          return
+        }
         reply.send({ ok: true, sentCount: result.sent, targetCount: result.targets })
       } catch (err) {
         reply.status(500).send({
