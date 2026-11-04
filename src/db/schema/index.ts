@@ -1,4 +1,4 @@
-import { pgTable, text, integer, jsonb, bigint, timestamp, uniqueIndex, index } from 'drizzle-orm/pg-core'
+import { pgTable, text, integer, jsonb, bigint, doublePrecision, timestamp, uniqueIndex, index } from 'drizzle-orm/pg-core'
 
 // ============================================================
 // Cloud Pharmacy Registrations
@@ -83,7 +83,7 @@ export const cloudSaleItems = pgTable('cloud_sale_items', {
   saleGlobalId: text('sale_global_id'),
   medicineGlobalId: text('medicine_global_id'),
   medicineName: text('medicine_name'),
-  quantity: integer('quantity').notNull().default(1),
+  quantity: doublePrecision('quantity').notNull().default(1),
   unitPriceCents: integer('unit_price_cents').notNull().default(0),
   totalPriceCents: integer('total_price_cents').notNull().default(0),
   payload: jsonb('payload'),
@@ -149,7 +149,7 @@ export const cloudInventoryBalances = pgTable('cloud_inventory_balances', {
   medicineGlobalId: text('medicine_global_id'),
   batchGlobalId: text('batch_global_id'),
   location: text('location').notNull().default('shelf'),
-  quantityBase: bigint('quantity_base', { mode: 'number' }).notNull().default(0),
+  quantityBase: doublePrecision('quantity_base').notNull().default(0),
   payload: jsonb('payload'),
   version: integer('version').notNull().default(1),
   serverVersion: integer('server_version').notNull().default(1),
@@ -245,7 +245,7 @@ export const cloudStockAdjustments = pgTable('cloud_stock_adjustments', {
   medicineGlobalId: text('medicine_global_id'),
   batchId: integer('batch_id'),
   batchGlobalId: text('batch_global_id'),
-  quantityBaseDelta: bigint('quantity_base_delta', { mode: 'number' }).notNull(),
+  quantityBaseDelta: doublePrecision('quantity_base_delta').notNull().default(0),
   reasonType: text('reason_type').notNull(),
   reasonNote: text('reason_note'),
   valueImpactCents: integer('value_impact_cents'),

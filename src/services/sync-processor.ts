@@ -332,7 +332,12 @@ async function processSaleItemSync(
       saleGlobalId: (entry.payload.saleGlobalId as string) ?? null,
       medicineGlobalId: (entry.payload.medicineGlobalId as string) ?? null,
       medicineName: (entry.payload.medicineName as string) ?? null,
-      quantity: (entry.payload.quantity as number) ?? 1,
+      quantity:
+        typeof entry.payload.quantity === 'number'
+          ? entry.payload.quantity
+          : typeof entry.payload.selectedUnitQuantity === 'number'
+          ? entry.payload.selectedUnitQuantity
+          : parseFloat(String(entry.payload.selectedUnitQuantity ?? entry.payload.quantity ?? 1)) || 1,
       unitPriceCents: (entry.payload.unitPriceCents as number) ?? 0,
       totalPriceCents: (entry.payload.totalPriceCents as number) ?? 0,
       payload: entry.payload,
@@ -496,7 +501,10 @@ async function processInventoryBalanceSync(
       medicineGlobalId: (entry.payload.medicineGlobalId as string) ?? null,
       batchGlobalId: (entry.payload.batchGlobalId as string) ?? null,
       location: (entry.payload.location as string) ?? 'shelf',
-      quantityBase: (entry.payload.quantityBase as number) ?? 0,
+      quantityBase:
+        typeof entry.payload.quantityBase === 'number'
+          ? entry.payload.quantityBase
+          : parseFloat(String(entry.payload.quantityBase ?? 0)) || 0,
       payload: entry.payload,
       version: entry.version,
       serverVersion: 1,
@@ -510,7 +518,10 @@ async function processInventoryBalanceSync(
     .update(cloudInventoryBalances)
     .set({
       location: (entry.payload.location as string) ?? existing[0].location,
-      quantityBase: (entry.payload.quantityBase as number) ?? existing[0].quantityBase,
+      quantityBase:
+        typeof entry.payload.quantityBase === 'number'
+          ? entry.payload.quantityBase
+          : (parseFloat(String(entry.payload.quantityBase ?? '')) || existing[0].quantityBase),
       payload: entry.payload,
       version: entry.version,
       serverVersion: sql`${cloudInventoryBalances.serverVersion} + 1`,
@@ -677,7 +688,10 @@ async function processStockAdjustmentSync(
       medicineGlobalId: (entry.payload.medicineGlobalId as string) ?? null,
       batchId: (entry.payload.batchId as number) ?? null,
       batchGlobalId: (entry.payload.batchGlobalId as string) ?? null,
-      quantityBaseDelta: (entry.payload.quantityBaseDelta as number) ?? 0,
+      quantityBaseDelta:
+        typeof entry.payload.quantityBaseDelta === 'number'
+          ? entry.payload.quantityBaseDelta
+          : parseFloat(String(entry.payload.quantityBaseDelta ?? 0)) || 0,
       reasonType: (entry.payload.reasonType as string) ?? 'other',
       reasonNote: (entry.payload.reasonNote as string) ?? null,
       valueImpactCents: (entry.payload.valueImpactCents as number) ?? null,
