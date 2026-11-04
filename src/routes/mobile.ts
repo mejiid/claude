@@ -16,6 +16,7 @@ import {
 } from '../services/mobile-queries.js'
 import { pushTokens, cloudEntities } from '../db/schema/index.js'
 import { getDb } from '../db/connection.js'
+import { sendTestNotification } from '../services/push-service.js'
 
 function rangeParams(request: FastifyRequest): { from: number; to: number } {
   const query = request.query as { from?: string; to?: string }
@@ -200,6 +201,19 @@ export async function mobileRoutes(app: FastifyInstance): Promise<void> {
       }
 
       reply.send({ ok: true })
+    })
+
+    mobile.post('/api/mobile/test-push', async (request: FastifyRequest, reply: FastifyReply) => {
+      const pharmacyId = (request as any).pharmacyId as number
+      try {
+        const result = await sendTestNotification(pharmacyId)
+        reply.send({ ok: true, sentCount: result.sent, targetCount: result.targets })
+      } catch (err) {
+        reply.status(500).send({
+          ok: false,
+          error: err instanceof Error ? err.message : 'Failed to dispatch test notification',
+        })
+      }
     })
   })
 }
