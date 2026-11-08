@@ -314,26 +314,50 @@ export function categorizePayment(
   const pClean = p.toLowerCase().replace(/[^a-z0-9]/g, '')
   const mClean = m.replace(/[^a-z0-9]/g, '')
 
-  // 1. Mobile Wallets (Exactly 4: eBirr, CBE Birr, Amole, Telebirr)
-  if (pClean.includes('ebirr') || pClean.includes('ebir') || mClean.includes('ebirr')) {
-    return { category: 'mobile_money', provider: 'eBirr' }
+  // 1. Direct exact matches for known 4 wallets
+  for (const w of EXACT_WALLETS) {
+    if (p.toLowerCase() === w.toLowerCase()) {
+      return { category: 'mobile_money', provider: w }
+    }
+  }
+
+  // 2. Direct exact matches for known 16 banks
+  for (const b of EXACT_BANKS) {
+    if (p.toLowerCase() === b.toLowerCase()) {
+      return { category: 'bank_transfer', provider: b }
+    }
+  }
+
+  // 3. Fuzzy matches for Wallets (Priority order strictly prevents substring false-positives)
+  if (pClean.includes('telebirr') || pClean.includes('tele') || mClean.includes('telebirr') || mClean.includes('tele')) {
+    return { category: 'mobile_money', provider: 'Telebirr' }
   }
   if (
     pClean.includes('cbebirr') ||
+    pClean.includes('cbebir') ||
     mClean.includes('cbebirr') ||
-    (pClean.includes('cbe') && (m === 'mobile_money' || m === 'wallet' || pClean.includes('birr') || pClean.includes('wallet')))
+    (pClean.includes('cbe') && (pClean.includes('birr') || m.includes('wallet') || m.includes('mobile')))
   ) {
     return { category: 'mobile_money', provider: 'CBE Birr' }
   }
   if (pClean.includes('amole') || mClean.includes('amole')) {
     return { category: 'mobile_money', provider: 'Amole' }
   }
-  if (pClean.includes('telebirr') || pClean.includes('tele') || mClean.includes('telebirr') || mClean.includes('tele')) {
-    return { category: 'mobile_money', provider: 'Telebirr' }
+  if (
+    (pClean === 'ebirr' || pClean === 'ebir' || pClean.startsWith('ebirr') || mClean === 'ebirr') &&
+    !pClean.includes('tele') &&
+    !pClean.includes('cbe')
+  ) {
+    return { category: 'mobile_money', provider: 'eBirr' }
   }
 
-  // 2. Banks (Exactly 16 Ethiopian Banks)
-  if (pClean.includes('commercial') || pClean === 'cbe' || pClean.includes('cbe') || mClean.includes('commercial')) {
+  // 4. Fuzzy matches for Banks (Strictly avoiding false CBE match for CBE Birr)
+  if (
+    (pClean.includes('commercial') || pClean === 'cbe' || pClean.startsWith('cbe') || mClean.includes('commercial')) &&
+    !pClean.includes('birr') &&
+    !m.includes('mobile') &&
+    !m.includes('wallet')
+  ) {
     return { category: 'bank_transfer', provider: 'Commercial Bank of Ethiopia' }
   }
   if (pClean.includes('awash') || mClean.includes('awash')) {
@@ -360,13 +384,13 @@ export function categorizePayment(
   if (pClean.includes('cooperative') || pClean.includes('coop') || mClean.includes('cooperative') || mClean.includes('coop')) {
     return { category: 'bank_transfer', provider: 'Cooperative Bank of Oromia' }
   }
-  if (pClean.includes('hibret') || mClean.includes('hibret')) {
+  if (pClean.includes('hibret') || pClean.includes('unitedbank') || mClean.includes('hibret')) {
     return { category: 'bank_transfer', provider: 'Hibret Bank' }
   }
   if (pClean.includes('nib') || mClean.includes('nib')) {
     return { category: 'bank_transfer', provider: 'Nib International Bank' }
   }
-  if (pClean.includes('oromia') || mClean.includes('oromia')) {
+  if ((pClean.includes('oromia') || mClean.includes('oromia')) && !pClean.includes('coop') && !pClean.includes('cooperative')) {
     return { category: 'bank_transfer', provider: 'Oromia Bank' }
   }
   if (pClean.includes('rammis') || mClean.includes('rammis')) {
@@ -382,15 +406,28 @@ export function categorizePayment(
     return { category: 'bank_transfer', provider: 'Zemen Bank' }
   }
 
-  // Method-level fallbacks if no specific brand matched
-  if (m === 'mobile_money' || m === 'wallet') {
-    return { category: 'mobile_money', provider: p || 'Telebirr' }
+  // 5. Method-level fallbacks if no specific brand matched
+  if (m === 'mobile_money' || m === 'wallet' || mClean.includes('wallet') || mClean.includes('mobile')) {
+    return { category: 'mobile_money', provider: p || 'Mobile Wallet' }
   }
-  if (m === 'bank_transfer' || m === 'bank' || pClean.includes('bank')) {
-    return { category: 'bank_transfer', provider: p || 'Commercial Bank of Ethiopia' }
+  if (m === 'bank_transfer' || m === 'bank' || mClean.includes('bank') || pClean.includes('bank')) {
+    return { category: 'bank_transfer', provider: p || 'Bank Transfer' }
   }
 
-  // 3. Counter Cash
+  // 6. Counter Cash
+  if (m === 'cash' || (!p && !m)) {
+    return { category: 'cash', provider: null }
+  }
+
+  if (p) {
+    if (pClean.includes('bank')) {
+      return { category: 'bank_transfer', provider: p }
+    }
+    if (pClean.includes('wallet') || pClean.includes('birr')) {
+      return { category: 'mobile_money', provider: p }
+    }
+  }
+
   return { category: 'cash', provider: null }
 }
 
