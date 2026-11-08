@@ -279,6 +279,32 @@ export async function getDashboard(pharmacyId: number, from?: number, to?: numbe
 
 export type NormalizedPaymentCategory = 'cash' | 'mobile_money' | 'bank_transfer'
 
+export const EXACT_WALLETS = [
+  'Telebirr',
+  'CBE Birr',
+  'eBirr',
+  'Amole',
+] as const
+
+export const EXACT_BANKS = [
+  'Commercial Bank of Ethiopia',
+  'Awash Bank',
+  'Dashen Bank',
+  'Bank of Abyssinia',
+  'Abay Bank',
+  'Ahadu Bank',
+  'Amhara Bank',
+  'Bunna Bank',
+  'Cooperative Bank of Oromia',
+  'Hibret Bank',
+  'Nib International Bank',
+  'Oromia Bank',
+  'Rammis Bank',
+  'Wegagen Bank',
+  'Zamzam Bank',
+  'Zemen Bank',
+] as const
+
 export function categorizePayment(
   rawMethod?: string,
   rawProvider?: string,
@@ -288,80 +314,80 @@ export function categorizePayment(
   const pClean = p.toLowerCase().replace(/[^a-z0-9]/g, '')
   const mClean = m.replace(/[^a-z0-9]/g, '')
 
-  // 1. Mobile Wallets (eBirr, Telebirr, CBE Birr, Amole)
+  // 1. Mobile Wallets (Exactly 4: eBirr, CBE Birr, Amole, Telebirr)
+  if (pClean.includes('ebirr') || pClean.includes('ebir') || mClean.includes('ebirr')) {
+    return { category: 'mobile_money', provider: 'eBirr' }
+  }
   if (
-    m === 'mobile_money' ||
-    m === 'wallet' ||
-    mClean.includes('telebirr') ||
-    mClean.includes('cbebirr') ||
-    mClean.includes('ebirr') ||
-    mClean.includes('amole') ||
-    pClean.includes('telebirr') ||
-    pClean.includes('tele') ||
     pClean.includes('cbebirr') ||
-    pClean.includes('cbe') ||
-    pClean.includes('ebirr') ||
-    pClean.includes('ebir') ||
-    pClean.includes('amole')
+    mClean.includes('cbebirr') ||
+    (pClean.includes('cbe') && (m === 'mobile_money' || m === 'wallet' || pClean.includes('birr') || pClean.includes('wallet')))
   ) {
-    let resolvedProvider: string | null = null
-    if (pClean.includes('ebirr') || pClean.includes('ebir') || mClean.includes('ebirr')) {
-      resolvedProvider = 'eBirr'
-    } else if (pClean.includes('cbe') || mClean.includes('cbe')) {
-      resolvedProvider = 'CBE Birr'
-    } else if (pClean.includes('amole') || mClean.includes('amole')) {
-      resolvedProvider = 'Amole'
-    } else if (pClean.includes('tele') || mClean.includes('tele')) {
-      resolvedProvider = 'Telebirr'
-    } else if (p) {
-      resolvedProvider = p
-    } else {
-      resolvedProvider = 'Mobile Wallet' // Never default unknown mobile wallet to Telebirr
-    }
-    return { category: 'mobile_money', provider: resolvedProvider }
+    return { category: 'mobile_money', provider: 'CBE Birr' }
+  }
+  if (pClean.includes('amole') || mClean.includes('amole')) {
+    return { category: 'mobile_money', provider: 'Amole' }
+  }
+  if (pClean.includes('telebirr') || pClean.includes('tele') || mClean.includes('telebirr') || mClean.includes('tele')) {
+    return { category: 'mobile_money', provider: 'Telebirr' }
   }
 
-  // 2. Bank Transfers (Commercial Bank of Ethiopia, Awash, Dashen, Abyssinia, etc.)
-  if (
-    m === 'bank_transfer' ||
-    m === 'bank' ||
-    pClean.includes('bank') ||
-    pClean.includes('cbe') ||
-    pClean.includes('awash') ||
-    pClean.includes('dashen') ||
-    pClean.includes('abyssinia') ||
-    pClean.includes('hibret') ||
-    pClean.includes('oromia') ||
-    pClean.includes('amhara') ||
-    pClean.includes('wegagen') ||
-    pClean.includes('zemen') ||
-    pClean.includes('ahadu') ||
-    pClean.includes('bunna') ||
-    pClean.includes('nib') ||
-    pClean.includes('abay') ||
-    pClean.includes('rammis') ||
-    pClean.includes('zamzam')
-  ) {
-    let resolvedProvider = p || 'Commercial Bank of Ethiopia'
-    if (pClean.includes('commercial') || pClean === 'cbe') resolvedProvider = 'Commercial Bank of Ethiopia'
-    else if (pClean.includes('awash')) resolvedProvider = 'Awash Bank'
-    else if (pClean.includes('dashen')) resolvedProvider = 'Dashen Bank'
-    else if (pClean.includes('abyssinia')) resolvedProvider = 'Bank of Abyssinia'
-    else if (pClean.includes('hibret')) resolvedProvider = 'Hibret Bank'
-    else if (pClean.includes('cooperative') || pClean.includes('coop')) resolvedProvider = 'Cooperative Bank of Oromia'
-    else if (pClean.includes('amhara')) resolvedProvider = 'Amhara Bank'
-    else if (pClean.includes('wegagen')) resolvedProvider = 'Wegagen Bank'
-    else if (pClean.includes('zemen')) resolvedProvider = 'Zemen Bank'
-    else if (pClean.includes('ahadu')) resolvedProvider = 'Ahadu Bank'
-    else if (pClean.includes('bunna')) resolvedProvider = 'Bunna Bank'
-    else if (pClean.includes('nib')) resolvedProvider = 'Nib International Bank'
-    else if (pClean.includes('abay')) resolvedProvider = 'Abay Bank'
-    else if (pClean.includes('rammis')) resolvedProvider = 'Rammis Bank'
-    else if (pClean.includes('zamzam')) resolvedProvider = 'Zamzam Bank'
-    else if (pClean.includes('oromia')) resolvedProvider = 'Oromia Bank'
-    else if (p) resolvedProvider = p
-    else resolvedProvider = 'Bank Transfer'
-    return { category: 'bank_transfer', provider: resolvedProvider }
+  // 2. Banks (Exactly 16 Ethiopian Banks)
+  if (pClean.includes('commercial') || pClean === 'cbe' || pClean.includes('cbe') || mClean.includes('commercial')) {
+    return { category: 'bank_transfer', provider: 'Commercial Bank of Ethiopia' }
+  }
+  if (pClean.includes('awash') || mClean.includes('awash')) {
+    return { category: 'bank_transfer', provider: 'Awash Bank' }
+  }
+  if (pClean.includes('dashen') || mClean.includes('dashen')) {
+    return { category: 'bank_transfer', provider: 'Dashen Bank' }
+  }
+  if (pClean.includes('abyssinia') || mClean.includes('abyssinia')) {
+    return { category: 'bank_transfer', provider: 'Bank of Abyssinia' }
+  }
+  if (pClean.includes('abay') || mClean.includes('abay')) {
+    return { category: 'bank_transfer', provider: 'Abay Bank' }
+  }
+  if (pClean.includes('ahadu') || mClean.includes('ahadu')) {
+    return { category: 'bank_transfer', provider: 'Ahadu Bank' }
+  }
+  if (pClean.includes('amhara') || mClean.includes('amhara')) {
+    return { category: 'bank_transfer', provider: 'Amhara Bank' }
+  }
+  if (pClean.includes('bunna') || mClean.includes('bunna')) {
+    return { category: 'bank_transfer', provider: 'Bunna Bank' }
+  }
+  if (pClean.includes('cooperative') || pClean.includes('coop') || mClean.includes('cooperative') || mClean.includes('coop')) {
+    return { category: 'bank_transfer', provider: 'Cooperative Bank of Oromia' }
+  }
+  if (pClean.includes('hibret') || mClean.includes('hibret')) {
+    return { category: 'bank_transfer', provider: 'Hibret Bank' }
+  }
+  if (pClean.includes('nib') || mClean.includes('nib')) {
+    return { category: 'bank_transfer', provider: 'Nib International Bank' }
+  }
+  if (pClean.includes('oromia') || mClean.includes('oromia')) {
+    return { category: 'bank_transfer', provider: 'Oromia Bank' }
+  }
+  if (pClean.includes('rammis') || mClean.includes('rammis')) {
+    return { category: 'bank_transfer', provider: 'Rammis Bank' }
+  }
+  if (pClean.includes('wegagen') || mClean.includes('wegagen')) {
+    return { category: 'bank_transfer', provider: 'Wegagen Bank' }
+  }
+  if (pClean.includes('zamzam') || mClean.includes('zamzam')) {
+    return { category: 'bank_transfer', provider: 'Zamzam Bank' }
+  }
+  if (pClean.includes('zemen') || mClean.includes('zemen')) {
+    return { category: 'bank_transfer', provider: 'Zemen Bank' }
+  }
+
+  // Method-level fallbacks if no specific brand matched
+  if (m === 'mobile_money' || m === 'wallet') {
+    return { category: 'mobile_money', provider: p || 'Telebirr' }
+  }
+  if (m === 'bank_transfer' || m === 'bank' || pClean.includes('bank')) {
+    return { category: 'bank_transfer', provider: p || 'Commercial Bank of Ethiopia' }
   }
 
   // 3. Counter Cash
@@ -527,25 +553,27 @@ export async function getSalesHistory(
 
   const totalCollectedCents = cashTotalCents + walletTotalCents + bankTotalCents
 
-  const walletProviders: ProviderBreakdownItem[] = Array.from(walletProvidersMap.entries())
-    .map(([name, data]) => ({
+  const walletProviders: ProviderBreakdownItem[] = EXACT_WALLETS.map((name) => {
+    const data = walletProvidersMap.get(name) ?? { totalCents: 0, count: 0 }
+    return {
       id: name.toLowerCase().replace(/\s+/g, '_'),
       name,
       totalCents: data.totalCents,
       count: data.count,
       percentage: walletTotalCents > 0 ? Math.round((data.totalCents / walletTotalCents) * 100) : 0,
-    }))
-    .sort((a, b) => b.totalCents - a.totalCents)
+    }
+  }).sort((a, b) => b.totalCents - a.totalCents || b.count - a.count)
 
-  const bankProviders: ProviderBreakdownItem[] = Array.from(bankProvidersMap.entries())
-    .map(([name, data]) => ({
+  const bankProviders: ProviderBreakdownItem[] = EXACT_BANKS.map((name) => {
+    const data = bankProvidersMap.get(name) ?? { totalCents: 0, count: 0 }
+    return {
       id: name.toLowerCase().replace(/\s+/g, '_'),
       name,
       totalCents: data.totalCents,
       count: data.count,
       percentage: bankTotalCents > 0 ? Math.round((data.totalCents / bankTotalCents) * 100) : 0,
-    }))
-    .sort((a, b) => b.totalCents - a.totalCents)
+    }
+  }).sort((a, b) => b.totalCents - a.totalCents || b.count - a.count)
 
   const paymentSummary: PaymentDashboardSummary = {
     totalCollectedCents,
