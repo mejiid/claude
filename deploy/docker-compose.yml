@@ -10,6 +10,16 @@ services:
       postgres:
         condition: service_healthy
 
+  web:
+    build: ../../web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_CLOUD_API_URL=http://localhost:3001
+    depends_on:
+      - app
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped

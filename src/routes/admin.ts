@@ -3,7 +3,7 @@ import { ulid } from 'ulid'
 import { eq, desc } from 'drizzle-orm'
 import { config } from '../config/index.js'
 import { getDb } from '../db/connection.js'
-import { cloudTenants, cloudTenantLicenses } from '../db/schema/index.js'
+import { cloudTenants, cloudTenantLicenses, subscriptionPayments } from '../db/schema/index.js'
 import { cloudLicensingService, CloudLicensingService } from '../services/licensing-service.js'
 
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
@@ -12,6 +12,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const adminKey = request.headers['x-admin-key']
     if (!adminKey || adminKey !== config.apiKeys.masterKey) {
       reply.status(401).send({ error: 'Unauthorized: Invalid or missing x-admin-key header' })
+      return
     }
   })
 
@@ -48,7 +49,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       email?: string
       licenseNumber?: string
       tinNumber?: string
-      plan?: 'trial' | 'standard' | 'enterprise'
+      plan?: 'trial' | 'standard' | 'enterprise' | 'lifetime' | 'extended'
     }
 
     if (!businessName || !phone) {
@@ -66,8 +67,10 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       .replace(/^-|-$/g, '') + `-${Math.floor(1000 + Math.random() * 9000)}`
 
     const selectedPlan = plan || 'standard'
-    const trialEndsAt = now + 30 * 24 * 60 * 60 * 1000
-    const gracePeriodEndsAt = trialEndsAt + 15 * 24 * 60 * 60 * 1000
+    const isLifetime = selectedPlan === 'lifetime'
+    const ONE_DAY = 24 * 60 * 60 * 1000
+    const trialEndsAt = isLifetime ? now + 50 * 365 * ONE_DAY : now + 30 * ONE_DAY
+    const gracePeriodEndsAt = isLifetime ? trialEndsAt : trialEndsAt + 30 * ONE_DAY
 
     // 1. Create tenant
     await db.insert(cloudTenants).values({
@@ -105,6 +108,103 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       currentPeriodEndsAt: trialEndsAt,
       gracePeriodEndsAt,
     })
+  })
+
+  // List all subscription payments (with tenant information)
+  app.get('/api/v1/admin/payments', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { status } = request.query as { status?: string }
+    const db = getDb()
+
+    const payments = await db.select().from(subscriptionPayments).orderBy(desc(subscriptionPayments.createdAt))
+    const tenants = await db.select().from(cloudTenants)
+
+    const tenantMap = new Map(tenants.map((t) => [t.tenantId, t]))
+
+    const result = payments
+      .filter((p) => (!status || p.status === status))
+      .map((p) => {
+        const tenant = tenantMap.get(p.tenantId)
+        return {
+          ...p,
+          pharmacyName: tenant?.businessName || `Pharmacy (${p.tenantId})`,
+          phone: tenant?.phone || '',
+        }
+      })
+
+    reply.send({ payments: result })
+  })
+
+  // Approve a pending bank transfer / offline payment
+  app.post('/api/v1/admin/payments/:id/approve', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string }
+    const paymentId = parseInt(id, 10)
+    if (isNaN(paymentId)) {
+      reply.status(400).send({ error: 'Invalid payment ID' })
+      return
+    }
+
+    const db = getDb()
+    const paymentRecords = await db
+      .select()
+      .from(subscriptionPayments)
+      .where(eq(subscriptionPayments.id, paymentId))
+      .limit(1)
+
+    if (paymentRecords.length === 0) {
+      reply.status(404).send({ error: 'Payment record not found' })
+      return
+    }
+
+    const payment = paymentRecords[0]
+    try {
+      const result = await cloudLicensingService.renewTenantSubscription({
+        tenantId: payment.tenantId,
+        months: payment.periodExtendedMonths || 1,
+        paymentMethod: (payment.paymentMethod as any) || 'bank_transfer',
+        referenceNumber: payment.referenceNumber,
+        amountCents: payment.amountCents,
+        notes: payment.notes || undefined,
+        recordedBy: 'admin',
+      })
+
+      // Update the pending payment status to completed
+      await db
+        .update(subscriptionPayments)
+        .set({ status: 'completed' })
+        .where(eq(subscriptionPayments.id, paymentId))
+
+      reply.send({
+        ok: true,
+        paymentId,
+        tenantId: payment.tenantId,
+        status: 'completed',
+        extendedUntil: result.extendedUntil,
+        graceUntil: result.graceUntil,
+      })
+    } catch (err) {
+      reply.status(400).send({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Approval failed',
+      })
+    }
+  })
+
+  // Reject a pending payment
+  app.post('/api/v1/admin/payments/:id/reject', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string }
+    const paymentId = parseInt(id, 10)
+    if (isNaN(paymentId)) {
+      reply.status(400).send({ error: 'Invalid payment ID' })
+      return
+    }
+
+    const db = getDb()
+    await db
+      .update(subscriptionPayments)
+      .set({ status: 'failed' })
+      .where(eq(subscriptionPayments.id, paymentId))
+
+    reply.send({ ok: true, paymentId, status: 'failed' })
   })
 
   // Manually renew or extend a subscription (Option C: bank transfer or cash payments)

@@ -391,9 +391,15 @@ async function processPaymentSync(
       globalId: entry.globalId,
       pharmacyId: entry.pharmacyId,
       saleGlobalId: (entry.payload.saleGlobalId as string) ?? null,
-      paymentMethod: (entry.payload.paymentMethod as string) ?? 'cash',
+      paymentMethod:
+        (entry.payload.paymentMethod as string) ??
+        (entry.payload.method as string) ??
+        'cash',
       amountCents: (entry.payload.amountCents as number) ?? 0,
-      referenceNumber: (entry.payload.referenceNumber as string) ?? null,
+      referenceNumber:
+        (entry.payload.referenceNumber as string) ??
+        (entry.payload.paymentReference as string) ??
+        null,
       payload: entry.payload,
       version: entry.version,
       serverVersion: 1,
@@ -406,9 +412,15 @@ async function processPaymentSync(
   await db
     .update(cloudPayments)
     .set({
-      paymentMethod: (entry.payload.paymentMethod as string) ?? existing[0].paymentMethod,
+      paymentMethod:
+        (entry.payload.paymentMethod as string) ??
+        (entry.payload.method as string) ??
+        existing[0].paymentMethod,
       amountCents: (entry.payload.amountCents as number) ?? existing[0].amountCents,
-      referenceNumber: (entry.payload.referenceNumber as string) ?? existing[0].referenceNumber,
+      referenceNumber:
+        (entry.payload.referenceNumber as string) ??
+        (entry.payload.paymentReference as string) ??
+        existing[0].referenceNumber,
       payload: entry.payload,
       version: entry.version,
       serverVersion: sql`${cloudPayments.serverVersion} + 1`,

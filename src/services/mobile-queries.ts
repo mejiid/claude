@@ -1,7 +1,7 @@
 import { and, eq, isNull } from 'drizzle-orm'
 import bcrypt from 'bcryptjs'
 import { getDb } from '../db/connection.js'
-import { cloudEntities, cloudSales } from '../db/schema/index.js'
+import { cloudEntities, cloudSales, cloudPayments } from '../db/schema/index.js'
 
 type EntityRow = {
   globalId: string
@@ -58,6 +58,52 @@ async function fetchEntities(
             appliedAt: s.soldAt,
           })
           existingGids.add(s.globalId)
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  if (entityType === 'payment') {
+    try {
+      const dbPayments = await db
+        .select()
+        .from(cloudPayments)
+        .where(and(eq(cloudPayments.pharmacyId, pharmacyId), isNull(cloudPayments.deletedAt)))
+      const existingGids = new Set(result.map((r) => r.globalId))
+      for (const p of dbPayments) {
+        const payloadObj = ((p.payload as Record<string, unknown>) ?? {})
+        if (!existingGids.has(p.globalId)) {
+          result.push({
+            globalId: p.globalId,
+            payload: {
+              ...payloadObj,
+              globalId: p.globalId,
+              saleGlobalId: p.saleGlobalId ?? payloadObj.saleGlobalId ?? payloadObj.sale_global_id,
+              method: p.paymentMethod ?? payloadObj.method ?? payloadObj.paymentMethod,
+              paymentMethod: p.paymentMethod ?? payloadObj.paymentMethod ?? payloadObj.method,
+              provider: payloadObj.provider ?? payloadObj.paymentProvider,
+              paymentProvider: payloadObj.paymentProvider ?? payloadObj.provider,
+              referenceNumber: p.referenceNumber ?? payloadObj.referenceNumber,
+              amountCents: p.amountCents ?? payloadObj.amountCents,
+              createdAt: p.createdAt,
+            },
+            appliedAt: p.createdAt,
+          })
+          existingGids.add(p.globalId)
+        } else {
+          const existing = result.find((r) => r.globalId === p.globalId)
+          if (existing) {
+            existing.payload = {
+              ...payloadObj,
+              ...existing.payload,
+              saleGlobalId: existing.payload.saleGlobalId || existing.payload.sale_global_id || p.saleGlobalId,
+              provider: existing.payload.provider || existing.payload.paymentProvider || payloadObj.provider || payloadObj.paymentProvider,
+              paymentProvider: existing.payload.paymentProvider || existing.payload.provider || payloadObj.paymentProvider || payloadObj.provider,
+              method: existing.payload.method || existing.payload.paymentMethod || p.paymentMethod,
+            }
+          }
         }
       }
     } catch {
@@ -231,6 +277,123 @@ export async function getDashboard(pharmacyId: number, from?: number, to?: numbe
   }
 }
 
+export type NormalizedPaymentCategory = 'cash' | 'mobile_money' | 'bank_transfer'
+
+export function categorizePayment(
+  rawMethod?: string,
+  rawProvider?: string,
+): { category: NormalizedPaymentCategory; provider: string | null } {
+  const m = (rawMethod ?? '').trim().toLowerCase()
+  const p = (rawProvider ?? '').trim()
+  const pClean = p.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const mClean = m.replace(/[^a-z0-9]/g, '')
+
+  // 1. Mobile Wallets (eBirr, Telebirr, CBE Birr, Amole)
+  if (
+    m === 'mobile_money' ||
+    m === 'wallet' ||
+    mClean.includes('telebirr') ||
+    mClean.includes('cbebirr') ||
+    mClean.includes('ebirr') ||
+    mClean.includes('amole') ||
+    pClean.includes('telebirr') ||
+    pClean.includes('tele') ||
+    pClean.includes('cbebirr') ||
+    pClean.includes('cbe') ||
+    pClean.includes('ebirr') ||
+    pClean.includes('ebir') ||
+    pClean.includes('amole')
+  ) {
+    let resolvedProvider: string | null = null
+    if (pClean.includes('ebirr') || pClean.includes('ebir') || mClean.includes('ebirr')) {
+      resolvedProvider = 'eBirr'
+    } else if (pClean.includes('cbe') || mClean.includes('cbe')) {
+      resolvedProvider = 'CBE Birr'
+    } else if (pClean.includes('amole') || mClean.includes('amole')) {
+      resolvedProvider = 'Amole'
+    } else if (pClean.includes('tele') || mClean.includes('tele')) {
+      resolvedProvider = 'Telebirr'
+    } else if (p) {
+      resolvedProvider = p
+    } else {
+      resolvedProvider = 'Mobile Wallet' // Never default unknown mobile wallet to Telebirr
+    }
+    return { category: 'mobile_money', provider: resolvedProvider }
+  }
+
+  // 2. Bank Transfers (Commercial Bank of Ethiopia, Awash, Dashen, Abyssinia, etc.)
+  if (
+    m === 'bank_transfer' ||
+    m === 'bank' ||
+    pClean.includes('bank') ||
+    pClean.includes('cbe') ||
+    pClean.includes('awash') ||
+    pClean.includes('dashen') ||
+    pClean.includes('abyssinia') ||
+    pClean.includes('hibret') ||
+    pClean.includes('oromia') ||
+    pClean.includes('amhara') ||
+    pClean.includes('wegagen') ||
+    pClean.includes('zemen') ||
+    pClean.includes('ahadu') ||
+    pClean.includes('bunna') ||
+    pClean.includes('nib') ||
+    pClean.includes('abay') ||
+    pClean.includes('rammis') ||
+    pClean.includes('zamzam')
+  ) {
+    let resolvedProvider = p || 'Commercial Bank of Ethiopia'
+    if (pClean.includes('commercial') || pClean === 'cbe') resolvedProvider = 'Commercial Bank of Ethiopia'
+    else if (pClean.includes('awash')) resolvedProvider = 'Awash Bank'
+    else if (pClean.includes('dashen')) resolvedProvider = 'Dashen Bank'
+    else if (pClean.includes('abyssinia')) resolvedProvider = 'Bank of Abyssinia'
+    else if (pClean.includes('hibret')) resolvedProvider = 'Hibret Bank'
+    else if (pClean.includes('cooperative') || pClean.includes('coop')) resolvedProvider = 'Cooperative Bank of Oromia'
+    else if (pClean.includes('amhara')) resolvedProvider = 'Amhara Bank'
+    else if (pClean.includes('wegagen')) resolvedProvider = 'Wegagen Bank'
+    else if (pClean.includes('zemen')) resolvedProvider = 'Zemen Bank'
+    else if (pClean.includes('ahadu')) resolvedProvider = 'Ahadu Bank'
+    else if (pClean.includes('bunna')) resolvedProvider = 'Bunna Bank'
+    else if (pClean.includes('nib')) resolvedProvider = 'Nib International Bank'
+    else if (pClean.includes('abay')) resolvedProvider = 'Abay Bank'
+    else if (pClean.includes('rammis')) resolvedProvider = 'Rammis Bank'
+    else if (pClean.includes('zamzam')) resolvedProvider = 'Zamzam Bank'
+    else if (pClean.includes('oromia')) resolvedProvider = 'Oromia Bank'
+    else if (p) resolvedProvider = p
+    else resolvedProvider = 'Bank Transfer'
+    return { category: 'bank_transfer', provider: resolvedProvider }
+  }
+
+  // 3. Counter Cash
+  return { category: 'cash', provider: null }
+}
+
+export interface ProviderBreakdownItem {
+  id: string
+  name: string
+  totalCents: number
+  count: number
+  percentage: number
+}
+
+export interface PaymentCategorySummary {
+  totalCents: number
+  count: number
+  percentage: number
+  providers: ProviderBreakdownItem[]
+}
+
+export interface PaymentDashboardSummary {
+  totalCollectedCents: number
+  cash: {
+    totalCents: number
+    count: number
+    percentage: number
+  }
+  wallet: PaymentCategorySummary
+  bank: PaymentCategorySummary
+}
+
 export interface SaleListResult {
   generatedAt: number
   range: { from: number; to: number }
@@ -238,6 +401,7 @@ export interface SaleListResult {
   totalRefundsCents: number
   totalNetCents: number
   transactionCount: number
+  paymentSummary: PaymentDashboardSummary
   page: number
   pageSize: number
   sales: Array<{
@@ -247,6 +411,10 @@ export interface SaleListResult {
     totalCents: number
     status: string
     pharmacistName: string
+    customerName?: string
+    paymentMethod: NormalizedPaymentCategory
+    paymentProvider?: string
+    paymentReference?: string
   }>
 }
 
@@ -268,6 +436,24 @@ export async function getSalesHistory(
     userByLocalId.set(num(u.payload.id), str(u.payload.fullName))
   }
 
+  // Index payments by saleGlobalId (and fallback saleId)
+  const paymentsBySaleGid = new Map<string, Array<Record<string, unknown>>>()
+  const paymentsBySaleId = new Map<number, Array<Record<string, unknown>>>()
+  for (const p of paymentEvents) {
+    const saleGid = str(p.payload.saleGlobalId) || str(p.payload.sale_global_id)
+    if (saleGid) {
+      const list = paymentsBySaleGid.get(saleGid) ?? []
+      list.push(p.payload)
+      paymentsBySaleGid.set(saleGid, list)
+    }
+    const saleId = num(p.payload.saleId) || num(p.payload.sale_id)
+    if (saleId > 0) {
+      const list = paymentsBySaleId.get(saleId) ?? []
+      list.push(p.payload)
+      paymentsBySaleId.set(saleId, list)
+    }
+  }
+
   const inRange = sales.filter((s) => {
     const soldAt = getSaleSoldAt(s.payload, s.appliedAt)
     return soldAt >= from && soldAt <= to
@@ -286,6 +472,102 @@ export async function getSalesHistory(
     )
     .reduce((sum, p) => sum + num(p.payload.amountCents), 0)
 
+  // Compute Payment Method & Provider aggregations across active sales in range
+  let cashTotalCents = 0
+  let cashCount = 0
+  let walletTotalCents = 0
+  let walletCount = 0
+  let bankTotalCents = 0
+  let bankCount = 0
+
+  const walletProvidersMap = new Map<string, { totalCents: number; count: number }>()
+  const bankProvidersMap = new Map<string, { totalCents: number; count: number }>()
+
+  for (const s of inRange) {
+    if (getSaleStatus(s.payload) === 'cancelled') continue
+
+    const pList =
+      paymentsBySaleGid.get(s.globalId) ??
+      paymentsBySaleId.get(num(s.payload.id)) ??
+      []
+    const primaryPayment = pList[0]
+    const rawMethod =
+      (primaryPayment ? str(primaryPayment.method) || str(primaryPayment.paymentMethod) || str(primaryPayment.payment_method) : '') ||
+      str(s.payload.paymentMethod) ||
+      str(s.payload.method)
+    const rawProvider =
+      (primaryPayment ? str(primaryPayment.provider) || str(primaryPayment.paymentProvider) : '') ||
+      str(s.payload.paymentProvider) ||
+      str(s.payload.provider)
+
+    const saleAmount = getSaleTotalCents(s.payload)
+    const { category, provider } = categorizePayment(rawMethod, rawProvider)
+
+    if (category === 'cash') {
+      cashTotalCents += saleAmount
+      cashCount += 1
+    } else if (category === 'mobile_money') {
+      walletTotalCents += saleAmount
+      walletCount += 1
+      const provName = provider || 'Mobile Wallet'
+      const cur = walletProvidersMap.get(provName) ?? { totalCents: 0, count: 0 }
+      cur.totalCents += saleAmount
+      cur.count += 1
+      walletProvidersMap.set(provName, cur)
+    } else if (category === 'bank_transfer') {
+      bankTotalCents += saleAmount
+      bankCount += 1
+      const provName = provider || 'Bank Transfer'
+      const cur = bankProvidersMap.get(provName) ?? { totalCents: 0, count: 0 }
+      cur.totalCents += saleAmount
+      cur.count += 1
+      bankProvidersMap.set(provName, cur)
+    }
+  }
+
+  const totalCollectedCents = cashTotalCents + walletTotalCents + bankTotalCents
+
+  const walletProviders: ProviderBreakdownItem[] = Array.from(walletProvidersMap.entries())
+    .map(([name, data]) => ({
+      id: name.toLowerCase().replace(/\s+/g, '_'),
+      name,
+      totalCents: data.totalCents,
+      count: data.count,
+      percentage: walletTotalCents > 0 ? Math.round((data.totalCents / walletTotalCents) * 100) : 0,
+    }))
+    .sort((a, b) => b.totalCents - a.totalCents)
+
+  const bankProviders: ProviderBreakdownItem[] = Array.from(bankProvidersMap.entries())
+    .map(([name, data]) => ({
+      id: name.toLowerCase().replace(/\s+/g, '_'),
+      name,
+      totalCents: data.totalCents,
+      count: data.count,
+      percentage: bankTotalCents > 0 ? Math.round((data.totalCents / bankTotalCents) * 100) : 0,
+    }))
+    .sort((a, b) => b.totalCents - a.totalCents)
+
+  const paymentSummary: PaymentDashboardSummary = {
+    totalCollectedCents,
+    cash: {
+      totalCents: cashTotalCents,
+      count: cashCount,
+      percentage: totalCollectedCents > 0 ? Math.round((cashTotalCents / totalCollectedCents) * 100) : 0,
+    },
+    wallet: {
+      totalCents: walletTotalCents,
+      count: walletCount,
+      percentage: totalCollectedCents > 0 ? Math.round((walletTotalCents / totalCollectedCents) * 100) : 0,
+      providers: walletProviders,
+    },
+    bank: {
+      totalCents: bankTotalCents,
+      count: bankCount,
+      percentage: totalCollectedCents > 0 ? Math.round((bankTotalCents / totalCollectedCents) * 100) : 0,
+      providers: bankProviders,
+    },
+  }
+
   const start = (page - 1) * pageSize
   const pageRows = inRange.slice(start, start + pageSize)
 
@@ -296,16 +578,44 @@ export async function getSalesHistory(
     totalRefundsCents,
     totalNetCents: totalSalesCents - totalRefundsCents,
     transactionCount: inRange.length,
+    paymentSummary,
     page,
     pageSize,
-    sales: pageRows.map((s) => ({
-      globalId: s.globalId,
-      receiptNumber: getSaleReceiptNumber(s.payload),
-      soldAt: getSaleSoldAt(s.payload, s.appliedAt),
-      totalCents: getSaleTotalCents(s.payload),
-      status: getSaleStatus(s.payload),
-      pharmacistName: userByLocalId.get(getSaleSoldByUserId(s.payload)) ?? 'Unknown',
-    })),
+    sales: pageRows.map((s) => {
+      const pList =
+        paymentsBySaleGid.get(s.globalId) ??
+        paymentsBySaleId.get(num(s.payload.id)) ??
+        []
+      const primaryPayment = pList[0]
+      const rawMethod =
+        (primaryPayment ? str(primaryPayment.method) || str(primaryPayment.paymentMethod) || str(primaryPayment.payment_method) : '') ||
+        str(s.payload.paymentMethod) ||
+        str(s.payload.method)
+      const rawProvider =
+        (primaryPayment ? str(primaryPayment.provider) || str(primaryPayment.paymentProvider) : '') ||
+        str(s.payload.paymentProvider) ||
+        str(s.payload.provider)
+      const referenceNumber =
+        (primaryPayment ? str(primaryPayment.referenceNumber) || str(primaryPayment.reference_number) : '') ||
+        str(s.payload.paymentReference) ||
+        str(s.payload.referenceNumber)
+
+      const { category, provider } = categorizePayment(rawMethod, rawProvider)
+      const customerName = str(s.payload.customerName) || str(s.payload.customer_name)
+
+      return {
+        globalId: s.globalId,
+        receiptNumber: getSaleReceiptNumber(s.payload),
+        soldAt: getSaleSoldAt(s.payload, s.appliedAt),
+        totalCents: getSaleTotalCents(s.payload),
+        status: getSaleStatus(s.payload),
+        pharmacistName: userByLocalId.get(getSaleSoldByUserId(s.payload)) ?? 'Unknown',
+        customerName: customerName || undefined,
+        paymentMethod: category,
+        paymentProvider: provider ?? undefined,
+        paymentReference: referenceNumber || undefined,
+      }
+    }),
   }
 }
 
@@ -337,6 +647,14 @@ export async function getSaleDetail(pharmacyId: number, globalId: string) {
 
   const payment = payments.find((p) => str(p.payload.saleGlobalId) === globalId)
 
+  const paymentMethod = payment
+    ? str(payment.payload.method) || str(payment.payload.paymentMethod) || str(sale.payload.paymentMethod)
+    : str(sale.payload.paymentMethod) || 'cash'
+  const rawPaymentProvider = payment
+    ? str(payment.payload.provider) || str(payment.payload.paymentProvider) || str(sale.payload.paymentProvider)
+    : str(sale.payload.paymentProvider) || ''
+  const { provider: resolvedProvider } = categorizePayment(paymentMethod, rawPaymentProvider)
+
   return {
     generatedAt: Date.now(),
     sale: {
@@ -347,13 +665,11 @@ export async function getSaleDetail(pharmacyId: number, globalId: string) {
       totalCents: getSaleTotalCents(sale.payload),
     },
     items: saleItems,
-    payment: payment
-      ? {
-          method: str(payment.payload.method),
-          provider: str(payment.payload.provider ?? ''),
-          amountCents: num(payment.payload.amountCents),
-        }
-      : null,
+    payment: {
+      method: paymentMethod,
+      provider: resolvedProvider ?? rawPaymentProvider,
+      amountCents: payment ? num(payment.payload.amountCents) || getSaleTotalCents(sale.payload) : getSaleTotalCents(sale.payload),
+    },
   }
 }
 

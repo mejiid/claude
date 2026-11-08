@@ -5,13 +5,13 @@ import { cloudTenants, cloudTenantLicenses, subscriptionPayments } from '../db/s
 import { config } from '../config/index.js'
 
 const SIGNING_SECRET = process.env.LICENSE_SIGNING_SECRET || 'pharmacy-saas-ed25519-public-signing-secret-v1'
-const FIFTEEN_DAYS_MS = 15 * 24 * 60 * 60 * 1000
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
+const DEFAULT_GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000 // 30-day offline grace period per D-09
 
 export interface SignedLicensePayload {
   tenantId: string
   businessName: string
-  plan: 'trial' | 'standard' | 'enterprise'
+  plan: 'trial' | 'standard' | 'enterprise' | 'lifetime' | 'extended'
   deviceFingerprint: string
   issuedAt: number
   validUntil: number
@@ -40,7 +40,7 @@ export class CloudLicensingService {
   static signLicense(
     params: Omit<SignedLicensePayload, 'signature' | 'graceUntil'> & { graceUntil?: number }
   ): SignedLicensePayload {
-    const graceUntil = params.graceUntil ?? params.validUntil + FIFTEEN_DAYS_MS
+    const graceUntil = params.graceUntil ?? params.validUntil + DEFAULT_GRACE_PERIOD_MS
     const payloadWithoutSig: Omit<SignedLicensePayload, 'signature'> = {
       tenantId: params.tenantId,
       businessName: params.businessName,
@@ -259,7 +259,7 @@ export class CloudLicensingService {
     // Extend from current period end or now (whichever is greater)
     const baseDate = Math.max(now, tenant.currentPeriodEndsAt)
     const newPeriodEndsAt = baseDate + params.months * THIRTY_DAYS_MS
-    const newGraceEndsAt = newPeriodEndsAt + FIFTEEN_DAYS_MS
+    const newGraceEndsAt = newPeriodEndsAt + DEFAULT_GRACE_PERIOD_MS
 
     // Update tenant status to active
     await db

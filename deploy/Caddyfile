@@ -4,3 +4,11 @@
         Strict-Transport-Security "max-age=31536000"
     }
 }
+
+{$WEB_DOMAIN:app.pharmacy.com} {
+    reverse_proxy web:3000
+    header {
+        Strict-Transport-Security "max-age=31536000"
+    }
+}
+
