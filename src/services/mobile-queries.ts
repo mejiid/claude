@@ -743,7 +743,13 @@ export interface LowStockResult {
   threshold: number
   lowStockCount: number
   depletedCount: number
-  items: Array<{ medicineName: string; storeQty: number; dispatcherQty: number; totalQty: number }>
+  items: Array<{
+    medicineGlobalId?: string
+    medicineName: string
+    storeQty: number
+    dispatcherQty: number
+    totalQty: number
+  }>
 }
 
 export async function getLowStock(
@@ -772,7 +778,7 @@ export async function getLowStock(
   // Pre-seed with all active medicines so out-of-stock (0 units) items are tracked
   const perMedicine = new Map<string, { store: number; dispatcher: number; name: string }>()
   for (const m of medicines) {
-    if (m.payload.isActive !== false) {
+    if (m.payload.isActive !== false && m.payload.isArchived !== true) {
       const name = str(m.payload.name)
       if (name) {
         perMedicine.set(m.globalId, { store: 0, dispatcher: 0, name })
@@ -789,21 +795,16 @@ export async function getLowStock(
 
     if (!medGid) continue
 
-    const qty = num(b.payload.quantityBase)
-    const entry = perMedicine.get(medGid) ?? {
-      store: 0,
-      dispatcher: 0,
-      name: medNameByGid.get(medGid) ?? 'Unknown',
-    }
+    const entry = perMedicine.get(medGid)
+    if (!entry) continue // Ignore balances belonging to archived or deleted medicines
 
+    const qty = num(b.payload.quantityBase)
     const loc = str(b.payload.location).toLowerCase()
     if (loc === 'store') {
       entry.store += qty
-    } else {
+    } else if (loc === 'dispatcher') {
       entry.dispatcher += qty
     }
-
-    perMedicine.set(medGid, entry)
   }
 
   const allItems = Array.from(perMedicine.entries())
@@ -827,6 +828,244 @@ export async function getLowStock(
     threshold,
     lowStockCount: lowStockItems.length,
     depletedCount: depletedItems.length,
+    items,
+  }
+}
+
+export interface InventoryItemResult {
+  medicineGlobalId: string
+  medicineName: string
+  storeQty: number
+  dispatcherQty: number
+  totalQty: number
+  sellingPriceCents?: number
+  dispatcherSellableQty: number
+  dispatcherExpiredQty: number
+  storeSellableQty: number
+  storeExpiredQty: number
+  hasExpired: boolean
+  hasExpiringSoon: boolean
+  nearestExpiryDate: number | null
+}
+
+export interface InventoryResult {
+  generatedAt: number
+  threshold: number
+  summary: {
+    totalMedicines: number
+    totalStoreUnits: number
+    totalDispatcherUnits: number
+    totalUnits: number
+    totalDispatcherMedicines: number
+    totalStoreMedicines: number
+    dispatcherSellableMedicines: number
+    dispatcherExpiredMedicines: number
+    storeSellableMedicines: number
+    storeExpiredMedicines: number
+    lowStockCount: number
+    depletedCount: number
+    inStockCount: number
+  }
+  items: InventoryItemResult[]
+}
+
+export async function getInventory(
+  pharmacyId: number,
+  threshold = 5,
+): Promise<InventoryResult> {
+  const now = Date.now()
+  const [balances, batches, medicines] = await Promise.all([
+    fetchEntities(pharmacyId, 'inventory_balance'),
+    fetchEntities(pharmacyId, 'inventory_batch'),
+    fetchEntities(pharmacyId, 'medicine'),
+  ])
+
+  const medInfoByGid = new Map<string, { name: string; priceCents?: number }>()
+  const medGidByLocalId = new Map<number, string>()
+
+  for (const m of medicines) {
+    const name = str(m.payload.name) || 'Unknown'
+    const priceCents = num(m.payload.currentSellingPriceCents) || undefined
+    medInfoByGid.set(m.globalId, { name, priceCents })
+    const localId = num(m.payload.id)
+    if (localId > 0) {
+      medGidByLocalId.set(localId, m.globalId)
+    }
+  }
+
+  // Map batches for expiry checks
+  const batchInfoByGid = new Map<string, { expiryDate: number; batchNumber: string }>()
+  const batchGidByLocalId = new Map<number, string>()
+  for (const b of batches) {
+    const localId = num(b.payload.id)
+    const expiryDate = num(b.payload.expiryDate) || num(b.payload.expiry_date)
+    const batchNumber = str(b.payload.batchNumber) || str(b.payload.batch_number)
+    batchInfoByGid.set(b.globalId, { expiryDate, batchNumber })
+    if (localId > 0) {
+      batchGidByLocalId.set(localId, b.globalId)
+    }
+  }
+
+  type MedAgg = {
+    name: string
+    priceCents?: number
+    storeSellable: number
+    storeExpired: number
+    dispSellable: number
+    dispExpired: number
+    nearestExpiry: number | null
+    hasExpiringSoon: boolean
+  }
+
+  const perMedicine = new Map<string, MedAgg>()
+  for (const m of medicines) {
+    if (m.payload.isArchived !== true && m.payload.isActive !== false) {
+      const name = str(m.payload.name)
+      if (name) {
+        const priceCents = num(m.payload.currentSellingPriceCents) || undefined
+        perMedicine.set(m.globalId, {
+          name,
+          priceCents,
+          storeSellable: 0,
+          storeExpired: 0,
+          dispSellable: 0,
+          dispExpired: 0,
+          nearestExpiry: null,
+          hasExpiringSoon: false,
+        })
+      }
+    }
+  }
+
+  const ninetyDaysMs = 90 * 86400000
+
+  for (const b of balances) {
+    const medGid =
+      str(b.payload.medicineGlobalId) ||
+      medGidByLocalId.get(num(b.payload.medicineId)) ||
+      (num(b.payload.medicineId) > 0 ? String(b.payload.medicineId) : '')
+
+    if (!medGid) continue
+
+    const entry = perMedicine.get(medGid)
+    if (!entry) continue // Do not resurrect archived or deleted medicines
+
+    const qty = num(b.payload.quantityBase)
+    if (qty <= 0) continue
+
+    // Resolve batch expiry
+    const batchGid =
+      str(b.payload.batchGlobalId) ||
+      batchGidByLocalId.get(num(b.payload.batchId)) ||
+      (num(b.payload.batchId) > 0 ? String(b.payload.batchId) : '')
+
+    const batch = batchGid ? batchInfoByGid.get(batchGid) : undefined
+    const expiry = batch?.expiryDate && batch.expiryDate > 0 ? batch.expiryDate : null
+
+    const isExpired = expiry !== null && expiry <= now
+    const isExpiringSoon = expiry !== null && !isExpired && (expiry - now) <= ninetyDaysMs
+
+    if (expiry !== null) {
+      if (entry.nearestExpiry === null || expiry < entry.nearestExpiry) {
+        entry.nearestExpiry = expiry
+      }
+    }
+    if (isExpiringSoon) {
+      entry.hasExpiringSoon = true
+    }
+
+    const loc = str(b.payload.location).toLowerCase()
+    if (loc === 'store') {
+      if (isExpired) entry.storeExpired += qty
+      else entry.storeSellable += qty
+    } else if (loc === 'dispatcher') {
+      if (isExpired) entry.dispExpired += qty
+      else entry.dispSellable += qty
+    }
+  }
+
+  let totalStoreUnits = 0
+  let totalDispatcherUnits = 0
+  let totalDispatcherMedicines = 0
+  let totalStoreMedicines = 0
+  let dispatcherSellableMedicines = 0
+  let dispatcherExpiredMedicines = 0
+  let storeSellableMedicines = 0
+  let storeExpiredMedicines = 0
+  let lowStockCount = 0
+  let depletedCount = 0
+  let inStockCount = 0
+
+  const items: InventoryItemResult[] = Array.from(perMedicine.entries())
+    .map(([medGid, entry]) => {
+      const storeQty = Math.max(0, Math.round(entry.storeSellable + entry.storeExpired))
+      const dispatcherQty = Math.max(0, Math.round(entry.dispSellable + entry.dispExpired))
+      const totalQty = storeQty + dispatcherQty
+
+      const dispSellable = Math.max(0, Math.round(entry.dispSellable))
+      const dispExpired = Math.max(0, Math.round(entry.dispExpired))
+      const storeSellable = Math.max(0, Math.round(entry.storeSellable))
+      const storeExpired = Math.max(0, Math.round(entry.storeExpired))
+
+      totalStoreUnits += storeQty
+      totalDispatcherUnits += dispatcherQty
+
+      if (dispatcherQty > 0) {
+        totalDispatcherMedicines++
+        if (dispSellable > 0) dispatcherSellableMedicines++
+        if (dispExpired > 0) dispatcherExpiredMedicines++
+      }
+
+      if (storeQty > 0) {
+        totalStoreMedicines++
+        if (storeSellable > 0) storeSellableMedicines++
+        if (storeExpired > 0) storeExpiredMedicines++
+      }
+
+      if (totalQty === 0) {
+        depletedCount++
+      } else if (totalQty <= threshold) {
+        lowStockCount++
+      } else {
+        inStockCount++
+      }
+
+      return {
+        medicineGlobalId: medGid,
+        medicineName: entry.name,
+        storeQty,
+        dispatcherQty,
+        totalQty,
+        sellingPriceCents: entry.priceCents,
+        dispatcherSellableQty: dispSellable,
+        dispatcherExpiredQty: dispExpired,
+        storeSellableQty: storeSellable,
+        storeExpiredQty: storeExpired,
+        hasExpired: dispExpired > 0 || storeExpired > 0,
+        hasExpiringSoon: entry.hasExpiringSoon,
+        nearestExpiryDate: entry.nearestExpiry,
+      }
+    })
+    .sort((a, b) => a.medicineName.localeCompare(b.medicineName))
+
+  return {
+    generatedAt: Date.now(),
+    threshold,
+    summary: {
+      totalMedicines: items.length,
+      totalStoreUnits,
+      totalDispatcherUnits,
+      totalUnits: totalStoreUnits + totalDispatcherUnits,
+      totalDispatcherMedicines,
+      totalStoreMedicines,
+      dispatcherSellableMedicines,
+      dispatcherExpiredMedicines,
+      storeSellableMedicines,
+      storeExpiredMedicines,
+      lowStockCount,
+      depletedCount,
+      inStockCount,
+    },
     items,
   }
 }

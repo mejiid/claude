@@ -9,6 +9,7 @@ import {
   getSalesHistory,
   getSaleDetail,
   getLowStock,
+  getInventory,
   getExpiry,
   getGrossProfit,
   getSyncStatus,
@@ -126,6 +127,13 @@ export async function mobileRoutes(app: FastifyInstance): Promise<void> {
         return
       }
       return detail
+    })
+
+    mobile.get('/api/mobile/stock/inventory', async (request: FastifyRequest) => {
+      const pharmacyId = (request as any).pharmacyId as number
+      const query = request.query as { threshold?: string }
+      const threshold = query.threshold ? parseInt(query.threshold, 10) : 5
+      return getInventory(pharmacyId, Number.isFinite(threshold) ? threshold : 5)
     })
 
     mobile.get('/api/mobile/stock/low', async (request: FastifyRequest) => {

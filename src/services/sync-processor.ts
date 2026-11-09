@@ -180,8 +180,28 @@ async function applyGenericEntity(
     return { stale: true, serverVersion: record.serverVersion }
   }
 
-  // Case 2: Client retried exact same version -> idempotent success without version bump
+  // Case 2: Client retried exact same version
   if (entry.version === record.version) {
+    if (JSON.stringify(entry.payload) !== JSON.stringify(record.payload)) {
+      await db
+        .update(cloudEntities)
+        .set({
+          payload: entry.payload,
+          serverVersion: sql`${cloudEntities.serverVersion} + 1`,
+          updatedAtClient: entry.timestamp,
+          appliedAt: now,
+          deletedAt: entry.operation === 'delete' ? now : null,
+        })
+        .where(
+          and(
+            eq(cloudEntities.pharmacyId, entry.pharmacyId),
+            eq(cloudEntities.entityType, entry.entityType),
+            eq(cloudEntities.globalId, entry.globalId),
+          ),
+        )
+      await appendOutbox(db, entry, now)
+      return { stale: false, serverVersion: (record.serverVersion ?? 0) + 1 }
+    }
     return { stale: false, serverVersion: record.serverVersion }
   }
 
